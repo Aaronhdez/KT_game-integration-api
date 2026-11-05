@@ -281,8 +281,58 @@ Status is **400**, the same as validation errors; only `code` distinguishes them
 
 ## Q6 — Random failures
 
-*TBD (steps 9–10).* Kinds, frequencies, error before vs after applying, can we
-tell them apart?
+### Withdraw (step 9)
+
+**What we did.** After `docker restart`, ran
+`probe.ps1 -Operation withdraw -Iterations 200` (1.00 each, user 34633089486,
+client timeout 30 s) → [`results/withdraw.csv`](wallet-spike/results/withdraw.csv).
+The first run recorded a PowerShell error instead of the network error for calls
+without a response (script bug, fixed), so a second run of 20 on user 34673635133
+captured the real error → [`results/withdraw-errors.csv`](wallet-spike/results/withdraw-errors.csv).
+
+**What we saw.**
+
+| Outcome | Run 1 (200) | Run 2 (20) | Total | % | Applied? | Latency (run 1) |
+|---|---|---|---|---|---|---|
+| `200` | 150 | 14 | 164 | 74.5 % | **always** | 29 ms – 4 968 ms (p50 2 277) |
+| `500 {"code":"666"}` | 17 | 1 | 18 | 8.2 % | **always** | 622 ms – 4 858 ms (p50 2 903) |
+| No response (connection closed) | 33 | 5 | 38 | 17.3 % | **never** | 5 046 ms – 5 997 ms (p50 5 479) |
+
+- No `other` or `unreadable` rows: every call either moved the balance by
+  exactly −1.00 or not at all. Check: 5000 − 167 applied = 4833 = final balance.
+- The `500` body is always `{"msg":"Internal server response.","code":"666"}`.
+- "No response" is the server **closing the keep-alive connection without
+  sending anything** (.NET: `WebException … KeepAliveFailure`). It is not our
+  timeout (30 s).
+- **Latency splits cleanly at ~5 s**: every answered call took < 5 s, every
+  unanswered one took 5.0–6.0 s. It looks like the Wallet draws a random delay
+  of 0–6 s and, when it exceeds ~5 s, drops the request *before* applying it.
+- We never saw an explicit error *before* applying (an error status with the
+  balance unchanged).
+
+**Conclusions.**
+
+- Three failure kinds, and in this sample each one maps to a single effect:
+
+  | What the client sees | Observed effect | Rate |
+  |---|---|---|
+  | `200` | applied | 74.5 % |
+  | `500` `666` | **applied** (error after applying) | 8.2 % |
+  | connection closed after ~5 s, no response | **not applied** | 17.3 % |
+
+- **A `500` must never be treated as *not applied*** — in this sample it was
+  always applied. Marking it `FAILED` would lose money from the player's point of
+  view (the Wallet took it, we say it failed).
+- A dropped connection was never applied in this sample, but **the client
+  cannot know that**: it is a property of this mock, not a contract, and a real
+  network could drop the response of an applied request. Both stay *unknown*
+  (`PENDING`) unless Q8 gives us a way to confirm (re-send → `409`).
+- About a quarter of the calls do not return a clean success → `PENDING` and its
+  resolution (Phase 11) are a normal path, not an edge case.
+- Phase 05 note: Go's `http.Transport` silently retries a request when a reused
+  connection is closed before any response, **but only for idempotent requests**
+  (GET, or with an `Idempotency-Key` header). Our `POST`s will not be retried
+  behind our back; `GET /balance` may be.
 
 ## Q7 — Latency and timeout
 

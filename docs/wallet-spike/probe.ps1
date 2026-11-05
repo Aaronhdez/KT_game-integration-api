@@ -42,18 +42,18 @@ function Send-Request([string]$method, [string]$path, [string]$json) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
         if ($method -eq 'GET') {
-            $resp = $client.GetAsync("$BaseUrl$path").Result
+            $resp = $client.GetAsync("$BaseUrl$path").GetAwaiter().GetResult()
         } else {
             $content = New-Object System.Net.Http.StringContent($json, [Text.Encoding]::UTF8, 'application/json')
-            $resp = $client.PostAsync("$BaseUrl$path", $content).Result
+            $resp = $client.PostAsync("$BaseUrl$path", $content).GetAwaiter().GetResult()
         }
-        $body = $resp.Content.ReadAsStringAsync().Result
+        $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
         $status = [string][int]$resp.StatusCode
     } catch {
         $inner = $_.Exception
         while ($inner.InnerException) { $inner = $inner.InnerException }
         if ($inner -is [System.Threading.Tasks.TaskCanceledException]) { $status = 'timeout' } else { $status = 'no-response' }
-        $body = $inner.Message
+        $body = $inner.GetType().Name + ': ' + $inner.Message
     }
     $sw.Stop()
     return [pscustomobject]@{ Status = $status; Body = $body; LatencyMs = $sw.ElapsedMilliseconds }
