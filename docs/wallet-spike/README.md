@@ -40,6 +40,24 @@ docker restart wallet-spike
 docker rm -f wallet-spike
 ```
 
+## Run the probe
+
+From `docs/wallet-spike/`, with a freshly restarted Wallet:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\probe.ps1 -Operation withdraw -Iterations 200 -OutFile results\withdraw.csv
+```
+
+Parameters: `-Operation withdraw|deposit|balance`, `-Iterations`, `-UserId`,
+`-Currency`, `-Amount` (string, e.g. `'1.00'`), `-TimeoutSeconds` (default 30).
+CSV columns: `status` (HTTP code, `timeout` or `no-response`), `walletCode`,
+`latencyMs`, `balanceBefore`, `balanceAfter`, `delta`, `applied`
+(`yes` = balance moved by exactly the amount, `no` = unchanged, `other`,
+`unreadable` = balance could not be read), `body` (first 120 chars).
+
+Calls are strictly sequential: do not run two probes (or REST Client requests)
+against the same user at the same time, or the balance comparison is meaningless.
+
 ## Files
 
 | File | Purpose |
