@@ -248,3 +248,66 @@ Content-Type: application/json
     { "amount": 750.5, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
   ]
 }
+
+###############################################################################
+# Q8 — Duplicates. Fixed betId/reference on purpose: run the requests in order.
+# To replay the section, restart the Wallet or change the two values below.
+###############################################################################
+
+@dupBet = 900001
+@dupRef = dup-demo-1
+
+### 1. Withdraw dupBet/dupRef → 200 (or 500 / dropped: still applied or not, check balance)
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 1, "betId": {{dupBet}}, "reference": "{{dupRef}}" } ]
+}
+
+### 2. Identical re-send → 409 DuplicatedTransaction (means: already applied)
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 1, "betId": {{dupBet}}, "reference": "{{dupRef}}" } ]
+}
+
+### 3. Same key, different amount → still 409 (amount is not part of the key)
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 2, "betId": {{dupBet}}, "reference": "{{dupRef}}" } ]
+}
+
+### 4. Deposit with the same betId/reference → 200 (separate namespace)
+POST {{baseUrl}}/api/v1/deposit
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 1, "betId": {{dupBet}}, "reference": "{{dupRef}}" } ]
+}
+
+### 5. Deposit with another betId but the same reference → 409 (deposit key = reference)
+POST {{baseUrl}}/api/v1/deposit
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 1, "betId": 900002, "reference": "{{dupRef}}" } ]
+}

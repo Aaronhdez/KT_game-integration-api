@@ -327,6 +327,8 @@ captured the real error → [`results/withdraw-errors.csv`](wallet-spike/results
   cannot know that**: it is a property of this mock, not a contract, and a real
   network could drop the response of an applied request. Both stay *unknown*
   (`PENDING`) unless Q8 gives us a way to confirm (re-send → `409`).
+  *(Step 12 confirmed it: dropped connections can be applied — see the
+  correction at the end of Q6.)*
 - About a quarter of the calls do not return a clean success → `PENDING` and its
   resolution (Phase 11) are a normal path, not an edge case.
 - Phase 05 note: Go's `http.Transport` silently retries a request when a reused
@@ -361,6 +363,27 @@ client timeout 30 s, fixed script) → [`results/deposit.csv`](wallet-spike/resu
   mirror image of withdraw: the player would be paid by the Wallet while we
   record the settlement as failed — and a provider retry could pay them twice
   unless the Wallet de-duplicates (Q8).
+
+### Correction (step 12): a dropped connection *can* be applied
+
+In Q8 three requests lost their connection **and were applied** (balance moved,
+and the re-send answered `409`); two more had already happened in step 6.
+The Wallet's own log explains the "no response" case: it records the real
+result with its latency, and every POST slower than ~5 s loses its response.
+Tally of every POST in the Wallet log during the spike:
+
+| Wallet-side latency | Logged status | Count | Applied? | Client saw |
+|---|---|---|---|---|
+| < 5 s | 200 / 500 / 400 / 401 / 409 | 412 | 200 and 500: yes | the response |
+| **≥ 5 s** | **400** | 82 | no | dropped connection |
+| **≥ 5 s** | **200** | **3** | **yes** | dropped connection |
+| ≥ 5 s | 409 | 1 | no | dropped connection |
+
+So the Wallet's HTTP server cuts every response that takes ≥ ~5 s (a server
+write timeout), **whatever the operation did**. Most slow requests are rejected
+inside the Wallet (logged as 400, body not logged), but some are applied.
+**"Not applied" in the step 9/10 samples was luck, not a rule**: a dropped
+connection is genuinely *unknown*.
 
 ## Q7 — Latency and timeout
 
@@ -410,23 +433,81 @@ Share of **answered** calls that a client timeout would cut:
 
 ## Q8 — Duplicate requests
 
-*TBD (step 12).* De-duplication by `reference` and/or `betId`?
+**What we did.** After `docker restart`, a sequence of withdraws and deposits on
+user 34673635133 (and one on 34616761765) combining repeated and new `betId` /
+`reference` values. Each request was re-sent while the answer was `500` or a
+dropped connection, and the balance was read before and after. Wallet logs were
+used to see the real result of dropped requests. Replayable cases:
+[`wallet-spike/requests.http`](wallet-spike/requests.http) (section Q8).
 
-**Preliminary observations (from step 6).**
+**What we saw** (`Bn` = betId, `Rn` = reference; "applied" = balance moved).
 
-- Several withdraws with the **same `reference` and different `betId`** were all
-  accepted (`200`) and applied → `reference` alone is **not** a de-duplication key.
-- Re-sending the **identical** request after a `500` or a dropped connection
-  answered **`409 {"msg":"Transaction already exists.","code":"DuplicatedTransaction"}`**,
-  and the balance proved the first attempt **had been applied** (deposit of 1 → +1;
-  withdraw of 0.001 → −0.001). Nothing was applied twice.
-- A withdraw with `betId 0` + an already-used `reference` → 409; `betId 0` + a new
-  `reference` → 200.
-- One deposit (amount 0, new `betId` 3016, `reference` already used by withdraws)
-  answered 409 on its first attempt — not explained yet.
-- Hypothesis: the key involves `betId` and `reference` together, maybe also the
-  operation type. **If confirmed, a 409 on re-send means "already applied", which
-  would turn an *unknown* outcome into a known one.** To be tested properly here.
+| # | Request | Already existing | Result |
+|---|---|---|---|
+| A2 | withdraw B1/R1 (identical re-send) | withdraw B1/R1 | **409**, not applied |
+| D | withdraw B1/R1, **amount 2** instead of 1 | withdraw B1/R1 | **409**, not applied |
+| B | withdraw B1/**R2** | withdraw B1/R1 | applied (connection dropped; re-send → 409) |
+| C | withdraw **B3**/R1 | withdraw B1/R1 | applied (500; re-send → 409) |
+| K | withdraw B1/R1 for **another user** | withdraw B1/R1 (user 1) | **409**, not applied |
+| N | withdraw [B1/R1, B13/R13] | withdraw B1/R1 | **409**, B13/R13 not applied either |
+| E | **deposit** B1/R1 | withdraw B1/R1 | 200, applied |
+| F, H | deposit B1/R5, then deposit B1/**R6** | — | both applied (two deposits on one bet) |
+| G | deposit B1/R5 (identical re-send) | deposit B1/R5 | **409**, not applied |
+| L | deposit **B11**/R1 | deposit B1/R1 | **409**, not applied |
+| Q5 | deposit **B63**/R62 | deposit B62/R62 | **409**, not applied |
+| P2 | deposit **B31**/R30 | withdraw B30/R30 only | applied (dropped; re-send → 409) |
+| P3 | deposit B30/R30 | deposit B31/R30 | **409** |
+| I | deposit B9/R9 with no withdraw for B9 | — | applied |
+| J | withdraw B9/R10 after that deposit | deposit B9/R9 | applied |
+| M | withdraw B12/R5 | deposit B1/R5 | applied |
+
+The 409 body is always
+`{"msg":"Transaction already exists.","code":"DuplicatedTransaction"}`: no
+balance, no original `id`.
+
+**Conclusions.**
+
+- **The Wallet does de-duplicate**, with a different key per operation:
+
+  | Operation | De-duplication key | Scope |
+  |---|---|---|
+  | withdraw | (`betId`, `reference`) | all users, withdraws only |
+  | deposit | `reference` | deposits only (cross-user not tested) |
+
+  Withdraws and deposits are separate namespaces (E, M, P2). The amount is
+  **not** part of the key (D).
+- **The Wallet has no bet state**: several withdraws or deposits on one bet,
+  a deposit without a withdraw, and a withdraw after a deposit are all accepted.
+  **Every bet rule of the assessment (one settlement per bet, cancel rules…) is
+  ours to enforce.**
+- **A re-send resolves an unknown outcome.** If we re-send the *identical*
+  request (same `betId`, `reference` and amount):
+  - `409 DuplicatedTransaction` → the earlier attempt **was applied**;
+  - `200` → it was not, and it is now applied (exactly once);
+  - nothing is ever applied twice.
+
+  This is the mechanism for resolving `PENDING` (Phase 11), and it also makes a
+  bounded client-side retry of operations safe. **Condition: every request we
+  send uses a `reference` that is unique to that transaction of ours** — our
+  `transactionId` (UUID) is the natural choice, stored before the call
+  (intent-first) so a re-send is byte-for-byte the same request.
+- Because the amount is not in the key, a 409 cannot detect a *different*
+  payload under the same key. That is fine: payload conflicts are checked by us
+  (payload hash) before anything reaches the Wallet.
+- A multi-item request with one duplicate is rejected as a whole (N): another
+  reason to send one transaction per request.
+- **Do not re-send immediately after a dropped connection.** The Wallet logs
+  slow requests finishing at ~5.7 s, after the client already saw the drop. If a
+  re-send reached the Wallet while the original was still being processed, the
+  duplicate check could run before the original is recorded and the operation
+  could be **applied twice** (not observed, but nothing rules it out).
+  Resolution should run a little later (seconds), not in the same instant.
+- The de-duplication memory is presumably in-memory like the balances, so it
+  would be lost if the Wallet restarts and a re-send after a restart would be
+  applied again. *Checked in Q10.*
+- The step-6 deposit that got 409 on its first attempt (reference used only by
+  withdraws and by an invalid deposit) is still not explained. It did not
+  reproduce in Q8 (P2), and it errs on the safe side (rejecting, not applying twice).
 
 ## Q9 — Reverting an operation
 
