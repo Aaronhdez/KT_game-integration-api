@@ -104,7 +104,8 @@ For every step, before committing:
    - `go mod init github.com/aaronhdez/game-integration-api`.
    - `Startup/main.go` with `main()` → `run() error` that just logs "starting"
      with `slog` and returns `nil`.
-   - Verify: `go build ./...`, `go run ./Startup` prints one JSON log line.
+   - Verify: `go build ./...`, `go run ./Startup` prints one log line (slog's default
+     text format; JSON arrives in step 4).
    - *Go concepts:* module vs package (≈ solution/assembly vs namespace),
      `go.mod` (≈ `.csproj`), `package main` + `func main`, import paths built
      from the module path + folder (`…/Application`), `go run`/`go build`,
