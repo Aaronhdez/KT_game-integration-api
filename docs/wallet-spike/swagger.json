@@ -1,0 +1,304 @@
+{
+    "schemes": ["http"],
+    "swagger": "2.0",
+    "info": {
+        "description": "Scaffold for API\n[Read me]()",
+        "title": "wallet-client",
+        "termsOfService": "http://swagger.io/terms/",
+        "contact": {},
+        "version": "1.0.0"
+    },
+    "host": "",
+    "basePath": "",
+    "paths": {
+        "/api/v1/balance/{user_id}": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Returns the balance for a specific wallet",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Balance"
+                ],
+                "summary": "Returns the balance for a specific wallet",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "user_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.balanceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Returns an error 400",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Returns an error 500",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/deposit": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Allow the user to deposit funds into their wallet",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Deposit"
+                ],
+                "summary": "Allow the user to deposit funds into their wallet",
+                "parameters": [
+                    {
+                        "description": "Include a set of transactions to deposit",
+                        "name": "json",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.depositRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.operationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Returns an error 400",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Returns an error 500",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/withdraw": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Allow the user to withdraw funds from their wallet",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Withdraw"
+                ],
+                "summary": "Allow the user to withdraw funds from their wallet",
+                "parameters": [
+                    {
+                        "description": "Include a set of transactions to withdraw",
+                        "name": "json",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.withdrawRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.operationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Returns an error 400",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Returns an error 500",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.errorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "handlers.balanceResponse": {
+            "type": "object",
+            "properties": {
+                "balance": {
+                    "type": "number"
+                },
+                "currency": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.depositRequest": {
+            "type": "object",
+            "required": [
+                "currency",
+                "transactions",
+                "userId"
+            ],
+            "properties": {
+                "currency": {
+                    "type": "string"
+                },
+                "transactions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.depositRequestTransaction"
+                    }
+                },
+                "userId": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.depositRequestTransaction": {
+            "type": "object",
+            "required": [
+                "amount",
+                "betId",
+                "reference"
+            ],
+            "properties": {
+                "amount": {
+                    "type": "number"
+                },
+                "betId": {
+                    "type": "integer"
+                },
+                "reference": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.errorResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "msg": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.operationResponse": {
+            "type": "object",
+            "properties": {
+                "balance": {
+                    "type": "number"
+                },
+                "transactions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.operationResponseTransaction"
+                    }
+                }
+            }
+        },
+        "handlers.operationResponseTransaction": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "reference": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.withdrawRequest": {
+            "type": "object",
+            "required": [
+                "currency",
+                "transactions",
+                "userId"
+            ],
+            "properties": {
+                "currency": {
+                    "type": "string"
+                },
+                "transactions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.withdrawRequestTransaction"
+                    }
+                },
+                "userId": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.withdrawRequestTransaction": {
+            "type": "object",
+            "required": [
+                "amount",
+                "betId",
+                "reference"
+            ],
+            "properties": {
+                "amount": {
+                    "type": "number"
+                },
+                "betId": {
+                    "type": "integer"
+                },
+                "reference": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "name": "x-api-key",
+            "in": "header"
+        }
+    }
+}
