@@ -107,3 +107,114 @@ Content-Type: application/json
     { "amount": 1.00, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
   ]
 }
+
+###############################################################################
+# Q4 — Validation (the Wallet validates very little: see findings)
+###############################################################################
+
+### Negative amount → 400 InvalidRequest
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": -5, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### 3 decimals → 200, APPLIED with 3 decimals
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 0.001, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Amount as string → 200, applied
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": "1.00", "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Zero amount → 200, nothing moves
+POST {{baseUrl}}/api/v1/deposit
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 0, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Unknown user → 400 UserNotFound
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": 12345,
+  "currency": "USD",
+  "transactions": [
+    { "amount": 1, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Currency mismatch → 400 InvalidCurrency
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "EUR",
+  "transactions": [
+    { "amount": 1, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Empty transactions → 400 InvalidRequest
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": []
+}
+
+### Two transactions, the second invalid → 400, NOTHING applied
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 1, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" },
+    { "amount": -1, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Balance of unknown user → 200 with "0" and empty currency (!)
+GET {{baseUrl}}/api/v1/balance/12345
+x-api-key: {{apiKey}}

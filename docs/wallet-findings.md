@@ -189,7 +189,59 @@ wrong key (×2), followed by three balance reads with the right key.
 
 ## Q4 — Validation errors
 
-*TBD (step 6).* Status and body per invalid input.
+**What we did.** After `docker restart`, sent invalid or unusual requests for
+user 34673635133 (USD, 31415.25). Each request was retried while the answer
+was a random `500`/no response, and the balance was read before and after.
+Representative requests: [`wallet-spike/requests.http`](wallet-spike/requests.http) (section Q4).
+
+> Note: in the first run a script bug sent the same `reference` in every request.
+> The ambiguous cases were repeated with unique references; the table shows the
+> clean result. The bug itself revealed something about duplicates (see Q8).
+
+**What we saw** (withdraw unless stated).
+
+| Input | Status | Body `code` | Balance |
+|---|---|---|---|
+| `amount: -5` (withdraw and deposit) | 400 | `InvalidRequest` | unchanged |
+| `amount: 0` (withdraw and deposit) | **200** | — | unchanged; consumes a Wallet `id` |
+| `amount` missing | **200** | — | unchanged (treated as 0) |
+| `amount: 1.005` / `0.001` (3 decimals) | **200** | — | **applied with 3 decimals** (`31414.245`) |
+| `amount: "1.00"` (string) | **200** | — | applied |
+| `amount: 1e2` (exponent) | **200** | — | applied (−100) |
+| unknown `userId` 12345 | 400 | `UserNotFound` | — |
+| currency `EUR` for a USD user | 400 | `InvalidCurrency` (*Currency mismatch for the user.*) | unchanged |
+| currency `GBP` / `usd` (lowercase) | 400 | `InvalidCurrency` | unchanged |
+| malformed JSON | 400 | `InvalidRequest` | unchanged |
+| `transactions` missing or `[]` | 400 | `InvalidRequest` | unchanged |
+| `betId` missing | **200** | — | applied (treated as `betId` 0) |
+| `betId`: `"3012"` / `1.5` / `-7` | 400 | `InvalidRequest` | unchanged |
+| `betId: 0` | 200 | — | applied |
+| `reference` missing or `""` | **200** | — | applied; response echoes `"reference":""` |
+| 2 transactions, the 2nd invalid (`-1`) | 400 | `InvalidRequest` | **unchanged** (first one not applied either) |
+| `GET /balance/12345` (unknown user) | **200** | `{"balance":"0","currency":""}` | — |
+| `GET /balance/abc` | 400 | `InvalidRequest` | — |
+
+All 400 bodies have the shape `{"msg":"…","code":"…"}`; `msg` is a fixed text per code.
+
+**Conclusions.**
+
+- **The Wallet validates very little.** It accepts 3+ decimals, string amounts,
+  zero amounts and missing `betId`/`reference`. **All validation of money and
+  identifiers must happen on our side, before the call**; we must never send a
+  request we have not validated (Phase 03 `Money`, Phases 08–10 handlers).
+- What it does reject (`400 InvalidRequest`, `UserNotFound`, `InvalidCurrency`)
+  is **definitive and nothing is applied** → *not applied*. With our own
+  validation in front, any 400 from the Wallet means a bug or a data mismatch on
+  our side (e.g. seeded currency ≠ Wallet currency) → `502 WALLET_ERROR`, logged.
+- A list with an invalid item is rejected **as a whole** (validation is atomic).
+  We still send exactly one transaction per request.
+- **`GET /balance` of an unknown user returns `200` with `"0"` and an empty
+  currency.** Our client must treat an empty `currency` as an error, otherwise we
+  would show a player a zero balance.
+- **Zero amounts are accepted by the Wallet and consume an `id`**, so the
+  zero-amount deposit decision (Phase 09) is ours. Forwarding it is possible.
+- Always send a non-empty `reference` and a positive `betId`: the Wallet would
+  silently use `""` and `0`.
 
 ## Q5 — Insufficient funds
 
@@ -207,6 +259,22 @@ tell them apart?
 ## Q8 — Duplicate requests
 
 *TBD (step 12).* De-duplication by `reference` and/or `betId`?
+
+**Preliminary observations (from step 6).**
+
+- Several withdraws with the **same `reference` and different `betId`** were all
+  accepted (`200`) and applied → `reference` alone is **not** a de-duplication key.
+- Re-sending the **identical** request after a `500` or a dropped connection
+  answered **`409 {"msg":"Transaction already exists.","code":"DuplicatedTransaction"}`**,
+  and the balance proved the first attempt **had been applied** (deposit of 1 → +1;
+  withdraw of 0.001 → −0.001). Nothing was applied twice.
+- A withdraw with `betId 0` + an already-used `reference` → 409; `betId 0` + a new
+  `reference` → 200.
+- One deposit (amount 0, new `betId` 3016, `reference` already used by withdraws)
+  answered 409 on its first attempt — not explained yet.
+- Hypothesis: the key involves `betId` and `reference` together, maybe also the
+  operation type. **If confirmed, a 409 on re-send means "already applied", which
+  would turn an *unknown* outcome into a known one.** To be tested properly here.
 
 ## Q9 — Reverting an operation
 
