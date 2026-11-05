@@ -218,3 +218,33 @@ Content-Type: application/json
 ### Balance of unknown user → 200 with "0" and empty currency (!)
 GET {{baseUrl}}/api/v1/balance/12345
 x-api-key: {{apiKey}}
+
+###############################################################################
+# Q5 — Insufficient funds (KES player starts at 750.5 after a restart)
+###############################################################################
+
+### Above balance → 400 InsufficientBalance
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userKes}},
+  "currency": "KES",
+  "transactions": [
+    { "amount": 750.51, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Exact balance → ALSO 400 InsufficientBalance (Wallet requires amount < balance)
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userKes}},
+  "currency": "KES",
+  "transactions": [
+    { "amount": 750.5, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}

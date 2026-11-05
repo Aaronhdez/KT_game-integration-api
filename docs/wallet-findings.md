@@ -245,7 +245,39 @@ All 400 bodies have the shape `{"msg":"…","code":"…"}`; `msg` is a fixed tex
 
 ## Q5 — Insufficient funds
 
-*TBD (step 7).* Status and body; balance untouched?
+**What we did.** On user 34616761765 (KES, 750.5, untouched since the restart):
+withdraws above, equal to and just below the balance, a two-item withdraw whose
+items fit individually but not together, and small amounts on a nearly empty
+wallet. Balance read before and after each one; retries only on `500`/no response.
+
+**What we saw.**
+
+| Balance | Withdraw | Status | Balance after |
+|---|---|---|---|
+| 750.5 | 750.51 | 400 `InsufficientBalance` | 750.5 |
+| 750.5 | 400 + 400 (two items) | 400 `InsufficientBalance` | 750.5 (neither applied) |
+| 750.5 | **750.5 (exact)** | **400 `InsufficientBalance`** | 750.5 |
+| 750.5 | 0.01 | 200 | 750.49 |
+| 750.49 | **750.49 (exact)** | **400 `InsufficientBalance`** | 750.49 |
+| 750.49 | 750.48 | 200 | 0.01 |
+| 0.01 | **0.01 (exact)** | **400 `InsufficientBalance`** | 0.01 |
+| 0.01 | 0.001 | 200 | 0.009 |
+
+Body: `{"msg":"Insufficient balance for the user.","code":"InsufficientBalance"}`.
+Status is **400**, the same as validation errors; only `code` distinguishes them.
+
+**Conclusions.**
+
+- `InsufficientBalance` is **definitive and nothing is applied** (also for
+  multi-item requests) → *not applied* → our `422 INSUFFICIENT_FUNDS`, transaction `FAILED`.
+- The client must classify Wallet errors by **`code`**, not by HTTP status:
+  `400 + InsufficientBalance` → insufficient funds; any other `400` → our bug /
+  data mismatch (Q4).
+- **The Wallet requires `amount < balance` (strict)**: a player can never
+  withdraw their whole balance. We do not re-implement this rule (we never cache
+  the balance, and the Wallet is the authority); we just report what it says.
+  Recorded in `DESIGN.md` §5 as a known Wallet behaviour (step 15).
+- Only withdraws were tested: deposits add money, so they cannot run out of it.
 
 ## Q6 — Random failures
 
