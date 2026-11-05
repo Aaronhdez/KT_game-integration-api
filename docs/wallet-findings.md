@@ -364,7 +364,49 @@ client timeout 30 s, fixed script) → [`results/deposit.csv`](wallet-spike/resu
 
 ## Q7 — Latency and timeout
 
-*TBD (step 11).* Distribution, hangs, recommended `WALLET_TIMEOUT`.
+**What we did.** Reused the operation CSVs of Q6 (420 POSTs) and ran
+`probe.ps1 -Operation balance -Iterations 100` on user 34616761765
+→ [`results/balance.csv`](wallet-spike/results/balance.csv). Client timeout
+30 s everywhere, so no call was cut by us.
+
+**What we saw.**
+
+| | Answered | p50 | p95 | p99 | max | Dropped (no response) |
+|---|---|---|---|---|---|---|
+| `POST` withdraw/deposit | 342 / 420 | 2 385 ms | 4 692 ms | 4 968 ms | **4 971 ms** | 78 (18.6 %), all at 5.0–6.0 s |
+| `GET /balance` | 99 / 100 | 3 452 ms | 11 828 ms | 15 393 ms | **15 393 ms** | 1 (at 10.9 s) |
+
+Share of **answered** calls that a client timeout would cut:
+
+| Timeout | 2 s | 3 s | 4 s | 5 s | 6 s | 8 s | 10 s | 12 s | 16 s |
+|---|---|---|---|---|---|---|---|---|---|
+| `POST` | 59.4 % | 32.5 % | 17.8 % | 0 % | 0 % | — | — | — | — |
+| `GET /balance` | — | 51.5 % | — | 18.2 % | — | 10.1 % | 7.1 % | 4.0 % | 0 % |
+
+- Minimum latencies are 10–45 ms, so the delay is **artificial** (random per
+  request); arm64 emulation adds little.
+- The "~5 s" hypothesis of Q3 holds **for POSTs only**: no POST is answered
+  after 5 s and every slower one is dropped. `GET /balance` has a different,
+  longer delay (up to ~15 s) and is almost never dropped.
+- No call ever hung until our 30 s timeout.
+
+**Conclusions / recommendation.**
+
+- **Operations (`POST`): timeout 6 s.** It cuts no answered call, and anything
+  still waiting at 6 s will never be answered. The current
+  `WALLET_TIMEOUT=3s` in `.env.example` would turn about **a third of the
+  successful calls into `PENDING`** → change it in Phase 05.
+- **Balance (`GET`): a separate, longer timeout, ~10 s**, plus **one retry** on
+  `500`/dropped/timeout (a read is always safe to retry). Worst case ≈ 20 s,
+  still bounded (assessment 9.5). With 16 s nothing would be cut, but a 16 s
+  `GET /player` is a poor experience; 10 s + 1 retry is the proposed balance.
+- So the client needs **two timeouts** (e.g. `WALLET_TIMEOUT` for operations and
+  `WALLET_BALANCE_TIMEOUT` for reads). Final names and values: Phase 05 plan.
+- **No automatic retry of operations** in the client for now: whether re-sending
+  is safe depends on Q8.
+- Operations of the same player are serialised, so a slow Wallet call holds that
+  player's lock for up to the timeout; this bounds how long a concurrent request
+  of the same player can wait (Phase 04/08).
 
 ## Q8 — Duplicate requests
 
