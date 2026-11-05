@@ -155,7 +155,37 @@ and carries permissive CORS headers. The Wallet logs show it accepts/generates a
 
 ## Q3 — `x-api-key`
 
-*TBD (step 5).* Missing / wrong key.
+**What we did.** `GET /balance/34673635133` with: no key (×3), a wrong key (×3),
+an empty key, the right key in lowercase, the right key under the header name
+`X-API-KEY`, and the key in `Authorization`. Then `POST /withdraw` of 1.00 with a
+wrong key (×2), followed by three balance reads with the right key.
+
+**What we saw.**
+
+| Case | Status | Body |
+|---|---|---|
+| No key / wrong / empty / lowercase value / in `Authorization` | `401` | `{"msg":"Authentication error, see logs for more details.","code":"AuthenticatonError"}` |
+| Right key, header name `X-API-KEY` | `200` | balance |
+| `POST /withdraw` with a wrong key | `401` | same body; balance unchanged afterwards (`"31415.25"`) |
+
+- `401` is returned although Swagger does not document it. The code is spelled
+  `AuthenticatonError` (sic).
+- The key **value** is case-sensitive; the header **name** is not (normal HTTP).
+- Latency is applied even to rejected requests (0.4–4.5 s).
+- One wrong-key request got **no response at all** (curl `000` after 5.0 s) while
+  the Wallet logged `401 … latency:5000 ms`. Together with the `500 … 5552 ms`
+  seen in Q2, this suggests the Wallet's HTTP server closes the connection when
+  a response takes ≥ ~5 s (a server write timeout). *Hypothesis, checked in Q7.*
+
+**Conclusions.**
+
+- A `401` from the Wallet is **definitive and nothing was applied** → *not applied*.
+  But it is a **configuration error on our side** (bad `WALLET_API_KEY`), not a
+  player problem: map it to `502 WALLET_ERROR` and log it at `error` level, never
+  logging the key itself.
+- The client sends the header as `x-api-key` with the exact value from config.
+- Even a request that can only be rejected can end without a response → a
+  missing response never tells us what happened (*unknown*).
 
 ## Q4 — Validation errors
 

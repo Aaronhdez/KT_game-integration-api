@@ -75,3 +75,35 @@ Content-Type: application/json
     { "amount": 0.01, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
   ]
 }
+
+###############################################################################
+# Q3 — x-api-key
+###############################################################################
+
+### No API key → 401
+GET {{baseUrl}}/api/v1/balance/{{userUsd2}}
+
+### Wrong API key → 401
+GET {{baseUrl}}/api/v1/balance/{{userUsd2}}
+x-api-key: wrong
+
+### Right key value in lowercase → 401 (value is case-sensitive)
+GET {{baseUrl}}/api/v1/balance/{{userUsd2}}
+x-api-key: wj9qhlqmupahsnmxet2o
+
+### Header name in uppercase → 200 (header names are case-insensitive)
+GET {{baseUrl}}/api/v1/balance/{{userUsd2}}
+X-API-KEY: {{apiKey}}
+
+### Withdraw with wrong key → 401, balance must not change
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: wrong
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 1.00, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
