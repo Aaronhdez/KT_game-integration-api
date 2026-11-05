@@ -311,3 +311,31 @@ Content-Type: application/json
   "currency": "USD",
   "transactions": [ { "amount": 1, "betId": 900002, "reference": "{{dupRef}}" } ]
 }
+
+###############################################################################
+# Q9 — Reverting = compensating operation (same amount, same betId, new reference)
+###############################################################################
+
+@revBet = 900101
+
+### 1. Withdraw 10 on bet revBet
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 10, "betId": {{revBet}}, "reference": "{{$guid}}" } ]
+}
+
+### 2. Revert it with a deposit of 10, same bet, new reference → balance restored
+POST {{baseUrl}}/api/v1/deposit
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd2}},
+  "currency": "USD",
+  "transactions": [ { "amount": 10, "betId": {{revBet}}, "reference": "{{$guid}}" } ]
+}

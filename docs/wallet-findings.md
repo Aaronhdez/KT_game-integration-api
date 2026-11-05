@@ -511,7 +511,46 @@ balance, no original `id`.
 
 ## Q9 — Reverting an operation
 
-*TBD (step 13).* Compensating operations and their rules.
+**What we did.** After `docker restart`: reverted a withdraw with a deposit and a
+deposit with a withdraw (same amount, same `betId`, new `reference`) on user
+34673635133; then, on user 34616761765 (KES 750.5), tried to revert a deposit
+after the player had spent the money. Requests:
+[`wallet-spike/requests.http`](wallet-spike/requests.http) (section Q9).
+
+**What we saw.**
+
+| Step | Request | Result | Balance |
+|---|---|---|---|
+| R1a | withdraw 10, B1/`rev-w1` | 200 | 31415.25 → 31405.25 |
+| R1b | **deposit 10, B1/`rev-c1`** (revert R1a) | 200 | → **31415.25** (restored) |
+| R2a | deposit 10, B2/`rev-d2` | 200 | 31415.25 → 31425.25 |
+| R2b | **withdraw 10, B2/`rev-c2`** (revert R2a) | 200 | → **31415.25** (restored) |
+| R3a | KES deposit 10, B3 | 200 | 750.5 → 760.5 |
+| R3b | KES withdraw 755, another bet | 200 | → 5.5 |
+| R3c | **withdraw 10, B3** (revert R3a) | **400 `InsufficientBalance`** | 5.5 |
+| R3d | withdraw 5.5, B3 (whole balance) | 400 `InsufficientBalance` | 5.5 |
+
+**Conclusions.**
+
+- **There is no rollback; a revert is a compensating operation** in the opposite
+  direction for the same amount:
+  - revert a **withdraw** → **deposit** (always possible: deposits have no
+    balance check);
+  - revert a **deposit** → **withdraw**, which **can fail with insufficient
+    funds** if the player already spent the winnings (and, because of the strict
+    `amount < balance` rule of Q5, even when the balance equals the amount).
+- The compensating call uses the **same `betId`** and a **new `reference`**
+  (the cancel transaction's own UUID). The Wallet imposes no rule linking it to
+  the original (Q8: no bet state), so it cannot tell a revert from a normal
+  operation — the link exists only in our database.
+- A compensating call is just another Wallet operation: it can also return
+  `500` or lose its connection, so a CANCEL goes through the same
+  intent-first / `PENDING` / re-send flow as any other transaction.
+- Reverting a deposit that cannot be paid back is a Cancel case the API must
+  answer explicitly (`422 INSUFFICIENT_FUNDS`, cancel `FAILED`, bet unchanged) —
+  to be decided against the table of assessment §8.5 in Phase 10.
+- A partial revert (taking back only what is left) is technically possible but
+  would leave the bet half-cancelled; not proposed.
 
 ## Q10 — Restart
 
