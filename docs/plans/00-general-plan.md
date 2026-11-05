@@ -163,9 +163,14 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 
 ## 7. Open questions to resolve early
 
-1. Wallet behaviour (Phase 01): does it de-duplicate by `reference` or `betId`?
+1. ~~Wallet behaviour (Phase 01): does it de-duplicate by `reference` or `betId`?
    Does it expose any way to query a past transaction? What do "error after
-   applying" responses look like? Decimal format of amounts in requests/responses?
+   applying" responses look like? Decimal format of amounts in requests/responses?~~
+   **Resolved in Phase 01** → [`docs/wallet-findings.md`](../wallet-findings.md):
+   withdraws are de-duplicated by (`betId`, `reference`) and deposits by
+   `reference`, in memory only; there is no transaction lookup; "error after
+   applying" is a `500 {"code":"666"}` (and sometimes a dropped connection);
+   balances come back as JSON strings with exact decimals.
 2. Zero-amount deposit: forward to the Wallet or not? (Likely **not**, since no
    money moves — decide in Phase 09.)
 3. Retry after `FAILED`: return the stored failure (pure idempotency) or allow a

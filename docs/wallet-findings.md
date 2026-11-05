@@ -600,5 +600,72 @@ run, each one preceded by a restart.)
 
 ## Implications for later phases
 
-*TBD (step 15).* Classification table (*applied / not applied / unknown*),
-recommended timeout, retry policy.
+Summary of what Phases 03–12 should take from this document. These are
+**inputs** for the phase plans, which make the final decisions.
+
+### Classification of a Wallet operation result (Phase 05)
+
+| Wallet result | Classification | Our transaction | Our API |
+|---|---|---|---|
+| `2xx` | applied | `COMPLETED` | `201` |
+| `409 DuplicatedTransaction` on a **re-send** of our own request | applied (earlier attempt) | `COMPLETED` | `201`/`200` per phase |
+| `400 InsufficientBalance` | not applied | `FAILED` | `422 INSUFFICIENT_FUNDS` |
+| `400` any other code (`InvalidRequest`, `UserNotFound`, `InvalidCurrency`) | not applied | `FAILED` | `502 WALLET_ERROR` (our bug or data mismatch; log it) |
+| `401 AuthenticatonError` | not applied | `FAILED` | `502 WALLET_ERROR` (bad `WALLET_API_KEY`; log it, never the key) |
+| `500` (any body) | **unknown** | `PENDING` | `202` |
+| connection dropped / reset, timeout, anything else | **unknown** | `PENDING` | `202` |
+
+- Classify errors by the body's `code`, not only by HTTP status (Q5).
+- `409` on the **first** send cannot happen if every `reference` is unique; if
+  it ever does, it still means "a request with this key was applied".
+
+### Wallet client (Phase 05)
+
+- Send one transaction per request; `reference` = our `transactionId` (UUID),
+  `betId` = our positive `int64` bet ID; never send `""` or `0` (Q4, Q8).
+- Serialise amounts as JSON numbers with 2 decimals; parse `balance` from a
+  **JSON string** with `decimal.NewFromString` (Q2).
+- Treat an empty `currency` in `GET /balance` as an error (unknown user, Q4).
+- Accept any `2xx` as success (the Wallet returns `200`, Swagger says `201`).
+- Translate Wallet errors (`{code, msg}`) into domain errors; never pass them
+  through to our API.
+- Timeouts (Q7): **operations 6 s** (no POST is answered after 5 s);
+  **balance ~10 s + 1 retry**. The current `WALLET_TIMEOUT=3s` in `.env.example`
+  and `README.md` would turn a third of the successful calls into `PENDING` —
+  update both in Phase 05.
+- Optionally send our `transactionId` as `X-TRACE-ID` to correlate logs (Q2).
+
+### Use cases (Phases 08–11)
+
+- About **27 %** of operations end in `500` or a dropped connection → `PENDING`
+  is a normal path, not an edge case (Q6).
+- **Resolution of `PENDING`** (Phase 11): re-send the stored, identical request;
+  `409` → `COMPLETED`, `2xx` → `COMPLETED`, definitive `4xx` → `FAILED`, another
+  unknown → stays `PENDING`. Wait a few seconds after a dropped connection before
+  re-sending (Q8). The same re-send makes a bounded in-request retry safe.
+- **All validation and all bet rules are ours** (Q4, Q8): the Wallet accepts
+  3 decimals, zero amounts, several settlements per bet, deposits without
+  withdraws, etc.
+- **Cancel = compensating operation** with the same `betId` and a new
+  `reference`; cancelling a deposit can fail with `InsufficientBalance` (Q9).
+- Zero-amount deposits are accepted by the Wallet (Q4): forwarding or not is
+  purely our decision (Phase 09).
+
+### Persistence and Docker (Phases 04, 12)
+
+- Store the Wallet `id` for information only: it restarts at 1 with the Wallet (Q10).
+- Seed must match the Wallet's users and currencies (table in Q10); a mismatch
+  shows up as `400 InvalidCurrency`.
+- Image is `linux/arm64` only: Compose needs `platform: linux/arm64` on amd64
+  hosts. `GET /health` (no API key) works for the healthcheck (Q1, Q2).
+
+### Comparison with §3 of the general plan
+
+No contradictions. The findings **confirm** points 1–5 and 7 and **fill in** two
+open items:
+
+- §3.4 classification: confirmed, plus two cases it did not list
+  (`401` → not applied; `409` on re-send → applied).
+- §3.6 resolution of `PENDING`: the mechanism the plan left open is now known —
+  re-sending the identical request, which the Wallet de-duplicates (valid while
+  the Wallet does not restart).
