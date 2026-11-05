@@ -78,7 +78,80 @@ illustrative, only the types come from Swagger):
 
 ## Q2 — Happy path
 
-*TBD (step 4).* JSON encoding of amounts and IDs, response fields.
+**What we did.** With a freshly started Wallet: read the balance of the four
+seeded users, then withdraw 10.50 / deposit 25.25 on the USD user and
+withdraw 0.01 / deposit 0.1 / deposit 0.2 on the EUR user, reading the balance
+in between. Requests: [`wallet-spike/requests.http`](wallet-spike/requests.http) (section Q2).
+
+**What we saw.**
+
+Initial balances (all `200 OK`):
+
+| User | Response body |
+|---|---|
+| 34633089486 | `{"balance":"5000","currency":"USD"}` |
+| 34679664254 | `{"balance":"9000000000","currency":"EUR"}` |
+| 34616761765 | `{"balance":"750.5","currency":"KES"}` |
+| 34673635133 | `{"balance":"31415.25","currency":"USD"}` |
+
+Operations on 34633089486 (USD):
+
+```http
+POST /api/v1/withdraw
+{"userId":34633089486,"currency":"USD","transactions":[{"amount":10.50,"betId":1001,"reference":"spike-step4-w1"}]}
+
+HTTP/1.1 200 OK
+{"balance":"4989.5","transactions":[{"id":1,"reference":"spike-step4-w1"}]}
+```
+
+```http
+POST /api/v1/deposit
+{"userId":34633089486,"currency":"USD","transactions":[{"amount":25.25,"betId":1001,"reference":"spike-step4-d1"}]}
+
+HTTP/1.1 200 OK
+{"balance":"5014.75","transactions":[{"id":2,"reference":"spike-step4-d1"}]}
+```
+
+Balance re-read after each one matched the `balance` in the response.
+
+Precision on 34679664254 (EUR, 9 000 000 000): deposits of 0.1 and 0.2 returned
+`"9000000000.09"` and then `"9000000000.29"` — exact decimals, no float noise
+(the starting point was 8 999 999 999.99, see the note below).
+
+Every response, success or error, is `Content-Type: application/json; charset=utf-8`
+and carries permissive CORS headers. The Wallet logs show it accepts/generates an
+`X-TRACE-ID` header per request.
+
+**Conclusions.**
+
+- **Balances are JSON strings, not numbers** (`"4989.5"`), contrary to Swagger.
+  Our client must decode `balance` as a string and parse it with
+  `decimal.NewFromString`. Good news: no float conversion on the way in.
+- **Balances are not padded**: `"5000"`, `"750.5"`, `"9000000000.09"`. Never
+  compare them as strings; always parse to `Money`.
+- **The Wallet computes with exact decimals**, even with 10+ significant digits.
+- **Success is `200`, not `201`** as Swagger says. The client should accept any
+  `2xx` as success.
+- Request amounts are accepted as JSON numbers (`10.50`, `0.01`). Whether a
+  string amount or 3 decimals is accepted is checked in Q4. We will serialise
+  `Money` as a JSON number with exactly 2 decimals.
+- User IDs (11 digits, > 2³¹) are accepted as JSON integers → `int64` is fine.
+- Transaction `id`s are a **global sequence** across users and operations
+  (1, 2, … ), and a failed request also consumed one (see below).
+- `X-TRACE-ID`: we could send our `transactionId` in it so our logs and the
+  Wallet's logs correlate (Phase 05).
+- `/health` → `{"status":"OK"}`, no API key needed.
+
+**Preliminary failure observations (to be measured in Q6/Q7).**
+
+- `POST /withdraw` of 0.01 on the EUR user answered
+  `500 {"msg":"Internal server response.","code":"666"}` — **but it was applied**:
+  the next deposit of 0.1 returned `9000000000.09`, which only adds up if the
+  0.01 was withdrawn. It also consumed transaction `id` 3. → *error after applying exists*.
+- `GET /balance` also fails randomly with the same 500 body; a retry succeeded.
+- One `GET /balance` got **no HTTP response at all** after ~5.5 s (curl status
+  `000`) while the Wallet logged a 500 → the connection can drop without a response.
+- Every call takes **~0.6–4.8 s** (even `/health` took 1.3 s), most around 3 s.
 
 ## Q3 — `x-api-key`
 

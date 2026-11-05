@@ -1,0 +1,77 @@
+# Manual requests against the mock Wallet (VS Code REST Client extension).
+# Start the Wallet first: see README.md in this folder.
+# The API key is the public one from the assessment, valid only for the mock.
+#
+# The Wallet fails randomly: a single 500 here does not mean the request is wrong.
+# Re-read the balance to see whether an operation was actually applied.
+
+@baseUrl = http://localhost:8000
+@apiKey = Wj9QhLqMUPAHSNMxeT2o
+
+# Seeded wallet users
+@userUsd = 34633089486
+@userEur = 34679664254
+@userKes = 34616761765
+@userUsd2 = 34673635133
+
+###############################################################################
+# Q2 — Happy path
+###############################################################################
+
+### Health (no API key)
+GET {{baseUrl}}/health
+
+### Balance — USD player
+GET {{baseUrl}}/api/v1/balance/{{userUsd}}
+x-api-key: {{apiKey}}
+
+### Balance — EUR player (big balance)
+GET {{baseUrl}}/api/v1/balance/{{userEur}}
+x-api-key: {{apiKey}}
+
+### Balance — KES player (fractional balance)
+GET {{baseUrl}}/api/v1/balance/{{userKes}}
+x-api-key: {{apiKey}}
+
+### Balance — second USD player
+GET {{baseUrl}}/api/v1/balance/{{userUsd2}}
+x-api-key: {{apiKey}}
+
+### Withdraw 10.50 — fresh reference and betId each time
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 10.50, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Deposit 25.25 — fresh reference and betId each time
+POST {{baseUrl}}/api/v1/deposit
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userUsd}},
+  "currency": "USD",
+  "transactions": [
+    { "amount": 25.25, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
+
+### Withdraw 0.01 from the big EUR balance (precision check)
+POST {{baseUrl}}/api/v1/withdraw
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{
+  "userId": {{userEur}},
+  "currency": "EUR",
+  "transactions": [
+    { "amount": 0.01, "betId": {{$randomInt 1 1000000000}}, "reference": "{{$guid}}" }
+  ]
+}
