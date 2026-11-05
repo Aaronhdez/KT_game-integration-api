@@ -27,8 +27,8 @@ docker run -d --name wallet-spike -p 8000:8000 kentechsp/wallet-client:latest
 
 ## Reset to the initial balances
 
-The Wallet keeps its state in memory, so a restart resets it
-(to be confirmed in Q10 of the findings):
+The Wallet keeps its state in memory, so a restart resets balances, the
+duplicate-detection memory and the transaction `id` sequence (Q10 of the findings):
 
 ```bash
 docker restart wallet-spike

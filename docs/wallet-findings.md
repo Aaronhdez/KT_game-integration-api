@@ -502,9 +502,8 @@ balance, no original `id`.
   duplicate check could run before the original is recorded and the operation
   could be **applied twice** (not observed, but nothing rules it out).
   Resolution should run a little later (seconds), not in the same instant.
-- The de-duplication memory is presumably in-memory like the balances, so it
-  would be lost if the Wallet restarts and a re-send after a restart would be
-  applied again. *Checked in Q10.*
+- The de-duplication memory is in-memory like the balances: **after a Wallet
+  restart a re-send is applied again** (confirmed in Q10).
 - The step-6 deposit that got 409 on its first attempt (reference used only by
   withdraws and by an invalid deposit) is still not explained. It did not
   reproduce in Q8 (P2), and it errs on the safe side (rejecting, not applying twice).
@@ -554,7 +553,50 @@ after the player had spent the money. Requests:
 
 ## Q10 — Restart
 
-*TBD (step 14).* Is the state lost? Initial balances?
+**What we did.** With balances already changed by Q9: read all four balances,
+withdrew 7 on user 34673635133 with a fixed `betId`/`reference` and re-sent it,
+then `docker restart wallet-spike`, read the balances again and re-sent the same
+withdraw twice. (The same effect had been visible at the start of every probe
+run, each one preceded by a restart.)
+
+**What we saw.**
+
+| | USD 34633089486 | EUR 34679664254 | KES 34616761765 | USD 34673635133 |
+|---|---|---|---|---|
+| Before restart | 5000 | 9000000000 | 5.5 | 31408.25 |
+| **After restart** | **5000** | **9000000000** | **750.5** | **31415.25** |
+
+| Request (same `betId` 730001, `reference` `rst-R1`, amount 7) | Result |
+|---|---|
+| S1 first send | dropped connection, **applied** (31415.25 → 31408.25); re-send → 409 |
+| S2 re-send before restart | `409 DuplicatedTransaction` |
+| *`docker restart`* | |
+| S3 re-send after restart | **`200`, applied again**, Wallet `id` **1** |
+| S4 re-send | `409` |
+
+**Conclusions.**
+
+- **A restart wipes everything**: balances go back to the seeded values below,
+  the de-duplication memory is lost, and the Wallet's transaction `id` sequence
+  restarts at 1.
+
+  | Wallet user ID | Currency | Initial balance |
+  |---|---|---|
+  | 34633089486 | USD | 5000 |
+  | 34679664254 | EUR | 9000000000 |
+  | 34616761765 | KES | 750.5 |
+  | 34673635133 | USD | 31415.25 |
+
+- **After a Wallet restart, a re-send of a request that had been applied is
+  applied again.** Our "re-send to resolve `PENDING`" mechanism (Q8) is therefore
+  only correct while the Wallet keeps its memory. In this assessment the Wallet
+  restarts only when someone restarts it (and the documented reset is
+  `docker compose down -v`, which also wipes our DB), so we accept the risk and
+  document it in `DESIGN.md` ("Wallet restarts and loses its state").
+- Wallet transaction `id`s are **not unique over time** → store them for
+  information only, never as a key.
+- A fourth case (S1) of a dropped connection that **was applied**, consistent
+  with the Q6 correction.
 
 ## Implications for later phases
 
