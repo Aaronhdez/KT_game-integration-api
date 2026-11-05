@@ -334,6 +334,34 @@ captured the real error → [`results/withdraw-errors.csv`](wallet-spike/results
   (GET, or with an `Idempotency-Key` header). Our `POST`s will not be retried
   behind our back; `GET /balance` may be.
 
+### Deposit (step 10)
+
+**What we did.** After `docker restart`, ran
+`probe.ps1 -Operation deposit -Iterations 200` (1.00 each, user 34633089486,
+client timeout 30 s, fixed script) → [`results/deposit.csv`](wallet-spike/results/deposit.csv).
+
+**What we saw.**
+
+| Outcome | Count | % | Applied? | Latency |
+|---|---|---|---|---|
+| `200` | 142 | 71 % | **always** | 10 ms – 4 971 ms (p50 2 239) |
+| `500 {"code":"666"}` | 18 | 9 % | **always** | 709 ms – 4 797 ms (p50 2 815) |
+| No response (connection closed, `KeepAliveFailure`) | 40 | 20 % | **never** | 5 004 ms – 5 985 ms (p50 5 478) |
+
+- No `other` or `unreadable` rows. Check: 5000 + 160 applied = 5160 = final balance.
+- Same bodies and the same ~5 s split as withdraw.
+
+**Conclusions.**
+
+- **Deposit fails exactly like withdraw**: same three kinds, same effects,
+  similar rates. One classification rule serves both operations.
+- Across the 420 probed calls (withdraw + deposit): `200` 72.9 %, `500` 8.6 %
+  (all applied), dropped connection 18.6 % (none applied).
+- For a deposit the risk of mis-classifying a `500` as *not applied* is the
+  mirror image of withdraw: the player would be paid by the Wallet while we
+  record the settlement as failed — and a provider retry could pay them twice
+  unless the Wallet de-duplicates (Q8).
+
 ## Q7 — Latency and timeout
 
 *TBD (step 11).* Distribution, hangs, recommended `WALLET_TIMEOUT`.
