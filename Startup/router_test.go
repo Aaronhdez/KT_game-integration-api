@@ -2,15 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	application "github.com/aaronhdez/game-integration-api/Application"
 )
-
-const getMethod = "GET"
-const postMethod = "POST"
 
 func TestRouter_GetHealth_ReturnsStatusOK(t *testing.T) {
 	recorder := aGET("/health")
@@ -40,7 +38,7 @@ func TestRouter_PostHealth_ReturnsNotFound(t *testing.T) {
 /////////////////////////////////////////////////////////////////////////////////////
 
 func aPOST(path string) *httptest.ResponseRecorder {
-	router := NewRouter()
+	router := NewRouter(slog.New(slog.DiscardHandler))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, path, nil)
 	router.ServeHTTP(recorder, request)
@@ -48,7 +46,7 @@ func aPOST(path string) *httptest.ResponseRecorder {
 }
 
 func aGET(path string) *httptest.ResponseRecorder {
-	router := NewRouter()
+	router := NewRouter(slog.New(slog.DiscardHandler))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	router.ServeHTTP(recorder, request)
