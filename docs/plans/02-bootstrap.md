@@ -49,7 +49,7 @@ race tests can run in CI on Linux in Phase 13. Decided then, not now.)
 | `.env` is **not** loaded by the program | Docker Compose reads it (`env_file`, Phase 12). Locally, defaults are enough; variables can be set in the shell. | Auto-loading `.env` from code (hidden magic, extra dependency). |
 | Logger: `log/slog` JSON handler to stdout, level from `LOG_LEVEL`; the `*slog.Logger` is **passed explicitly** to whoever needs it | Stdlib, structured, matches AGENTS.md "no globals". | `zap`/`zerolog` (deps); using the global `slog.Default()` everywhere. |
 | Router: stdlib `http.ServeMux` with Go 1.22+ patterns (`"GET /health"`) | No framework. Method + path routing is built in. | `chi`, `gin`, `echo`. |
-| Unmatched routes return `404 {"code":"NOT_FOUND",…}` via a catch-all `"/"` | Every error body follows the 7.3 format. | Leaving the mux's plain-text 404. (Wrong-method `405` stays plain text from the mux — accepted, see open questions.) |
+| Unmatched routes return `404 {"code":"NOT_FOUND",…}` via a catch-all `"/"` | Every error body follows the 7.3 format. | Leaving the mux's plain-text 404. (Side effect: wrong methods also get this JSON `404` instead of `405` — accepted, see open questions.) |
 | JSON error writer + error-code constants in `Application/` | It's HTTP-layer code; Phase 06+ handlers reuse it. | Putting it in `Startup` (handlers in `Application` could not use it). |
 | `/health` handler in `Application/`, returns `200 {"status":"ok"}` | It's an HTTP handler; liveness only. A DB check (readiness) can be added in Phase 04. | Checking DB/Wallet now (they don't exist yet). |
 | `http.Server` with explicit timeouts (`ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`) | The zero-value server has no timeouts (slow-client attacks, `go vet`-style linters flag it). | `http.ListenAndServe(addr, mux)` (no timeouts). |
@@ -67,8 +67,9 @@ race tests can run in CI on Linux in Phase 13. Decided then, not now.)
 | `Startup/main.go` | `main()` → `run()`: load config, build logger, build router, start server, wait for signal, shut down. |
 | `Startup/config.go` | `Config` struct + `LoadConfig()` reading env vars with defaults and validation. |
 | `Startup/config_test.go` | Table-driven tests: defaults, valid values, invalid port/level/duration. |
-| `Startup/logger.go` | `NewLogger(level)` → `*slog.Logger` (JSON to stdout). |
-| `Startup/router.go` | `NewRouter(logger) http.Handler`: registers routes and wraps them with middleware. |
+| `Startup/logger.go` | `NewLogger(w, level)` → `*slog.Logger` (JSON lines to `w`; stdout in `run`). |
+| `Startup/logger_test.go` | Output is valid JSON with msg/level/attrs; messages below the level are dropped. |
+| `Startup/router.go` | `NewRouter() http.Handler` (step 7), `NewRouter(logger)` from step 9: registers routes and wraps them with middleware. |
 | `Startup/router_test.go` | `/health` → 200; unknown path → 404 JSON. |
 | `Application/errors.go` | Error-code constants (`INVALID_REQUEST`, `UNAUTHORIZED`, `NOT_FOUND`, `CONFLICT`, `INSUFFICIENT_FUNDS`, `WALLET_ERROR`, `WALLET_TIMEOUT`), `WriteError`, `writeJSON`. |
 | `Application/errors_test.go` | Status, `Content-Type` and body of `WriteError`. |
@@ -130,9 +131,13 @@ For every step, before committing:
    - *Exercise:* add a test case for `HTTP_PORT=70000`.
 
 4. **`feat(startup): add structured JSON logger`**
-   - `NewLogger(level slog.Level) *slog.Logger` with `slog.NewJSONHandler(os.Stdout, …)`.
-   - `run()` builds it from config and logs `"config loaded"` with port and
+   - `NewLogger(w io.Writer, level slog.Level) *slog.Logger` with
+     `slog.NewJSONHandler(w, …)`. `run()` passes `os.Stdout`; tests pass a
+     `bytes.Buffer` (`Startup/logger_test.go`: JSON output, level filtering).
+   - `run()` builds it from config and logs `"starting …"` with port and
      level (never secrets — there are none yet, but the habit starts here).
+     `main()` reports startup errors with a fixed-level logger, because config
+     may have failed before `run()` had a logger.
    - Verify: `$env:LOG_LEVEL="debug"; go run ./Startup` shows debug lines;
      `warn` hides info lines.
    - *Go concepts:* pointers (`*slog.Logger`) — when and why, `&T{}`; passing
@@ -141,7 +146,8 @@ For every step, before committing:
 
 5. **`feat(application): add JSON error writer and error codes`**
    - `Application/errors.go`: `const ( CodeInvalidRequest = "INVALID_REQUEST" … )`,
-     `type errorBody struct { Code string \`json:"code"\`; Message string \`json:"message"\` }`,
+     `type ErrorResponse struct { Code string \`json:"code"\`; Message string \`json:"message"\` }`
+     (exported — implemented that way so other packages' tests, e.g. the router's, can decode it),
      `WriteError(w http.ResponseWriter, status int, code, message string)`, and
      a private `writeJSON(w, status, v any)` that sets `Content-Type: application/json`.
    - Tests with `httptest.NewRecorder()`.
@@ -160,9 +166,10 @@ For every step, before committing:
      same-package access to unexported `writeJSON`.
 
 7. **`feat(startup): add router with health and json not-found`**
-   - `Startup/router.go`: `NewRouter(logger *slog.Logger) http.Handler` with
+   - `Startup/router.go`: `NewRouter() http.Handler` with
      `mux.HandleFunc("GET /health", application.Health)` and a catch-all `"/"`
-     → `WriteError(404, NOT_FOUND, "resource not found")`.
+     → `WriteError(404, NOT_FOUND, "resource not found")`. (The `logger`
+     parameter is added in step 9, when the middleware needs it.)
    - `Startup/router_test.go`: drive the router with `httptest` (no real network).
    - *Go concepts:* importing our own package (`application.Health`), the Go
      1.22 pattern syntax (`"GET /path/{id}"`, ≈ minimal-API `MapGet`), most-specific
@@ -186,6 +193,7 @@ For every step, before committing:
 
 9. **`feat(application): add request logging middleware`**
    - `Application/middleware.go`: `RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler`
+     *(built as `RequestLogger(logger, next) http.Handler` — see "As built")*
      logging `method`, `path`, `status`, `duration_ms` at info level. A small
      `statusRecorder` struct embeds `http.ResponseWriter` and overrides
      `WriteHeader` to remember the status. Never logs headers, query or body.
@@ -221,12 +229,38 @@ For every step, before committing:
 
 1. ~~**Module path**~~ **Resolved:** `github.com/aaronhdez/game-integration-api`
    (lowercase, by Go convention; the repo is expected to be delivered via GitHub).
-2. **Wrong method on an existing path** (e.g. `POST /health`) returns the mux's
-   plain-text `405`. Acceptable now; if we want JSON there too, revisit in Phase 06
-   when the real routes exist.
+2. ~~**Wrong method on an existing path**~~ **Resolved (step 7):** verified that
+   once the catch-all `"/"` is registered it also matches wrong methods, so
+   `POST /health` returns `404 {"code":"NOT_FOUND",…}` instead of the mux's
+   plain-text `405`. Accepted: every error stays in the 7.3 JSON format and the
+   assessment defines no "method not allowed" code. Revisit in Phase 06 if needed.
 3. ~~**Who types the code?**~~ **Resolved:** the developer writes steps 5–9
    from Claude's step-by-step instructions, and Claude reviews them. Claude writes
    steps 2–4 and 10. See *Working mode*.
+
+4. **Shared HTTP test helpers** — `assertStatusCode` and `decodeErrorResponse`
+   are duplicated in `Application` and `Startup` tests. **Deferred** (rule of
+   three): when Phases 06–10 add more handler tests, extract them into a
+   non-`_test` package following the `Domain/domaintest` pattern (e.g.
+   `Application/apptest` with `AssertStatusCode`, `DecodeJSON[T]`) and record it
+   in `ARCHITECTURE.md`.
+
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| `NewLogger(level)` | `NewLogger(w io.Writer, level)` | Tests write to a `bytes.Buffer`. |
+| `errorBody` (unexported) | `ErrorResponse` (exported), codes prefixed `Code…` | The router tests in `Startup` decode it. |
+| `NewRouter(logger)` from step 7 | `NewRouter()` in step 7, `NewRouter(logger)` in step 9 | No unused parameter. |
+| Wrong method → plain-text `405` | Wrong method → JSON `404` | The catch-all `"/"` also matches wrong methods (verified). |
+| `RequestLogger(logger) func(http.Handler) http.Handler` | `RequestLogger(logger, next) http.Handler`, wrapping the whole mux once | Two levels of functions instead of three; only two middlewares are expected (logging, auth), composed by hand. |
+| `duration_ms` field | `duration_ms` (briefly logged as `duration` in nanoseconds; fixed) | Unit in the name. |
+| Server code inline in `run()` | `newHTTPServer`, `startServer`, `waitForShutdownSignal`, `shutdownServer` in `main.go` | Readability; `run()` reads as a list of steps. `defer stop()` stays in `run()`. |
+| Table-driven tests | One test per behaviour, Arrange/Act/one assert, logic in `t.Helper()` helpers; tables only for cases of identical shape | Developer's preference. Shared helpers in `Application/helpers_test.go`. |
+| — | `.gitattributes` (`* text=auto eol=lf`) | VS Code saved `.go` files with CRLF, which `gofmt` rejects. |
+| Makefile/Taskfile (general plan) | None | `make`/`task` not installed; commands in README/AGENTS. |
+
+Not done (optional in the plan): a unit test for `newHTTPServer` (port → `Addr`).
 
 ## Definition of done
 

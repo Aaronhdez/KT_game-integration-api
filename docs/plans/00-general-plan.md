@@ -81,7 +81,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | # | Plan file | Scope | Depends on |
 |---|---|---|---|
 | 01 | `01-wallet-spike.md` | Run the mock Wallet, read Swagger, **discover its failure modes** empirically (errors before/after applying, timeouts, duplicate `reference`/`betId` behaviour, decimal format). Record findings in `docs/wallet-findings.md`. No production code. | — |
-| 02 | `02-bootstrap.md` | `go.mod`, `Startup/` (main, config from env, slog, DI wiring, router, `/health`, graceful shutdown), `.env.example`, Makefile/Taskfile. | — |
+| 02 | `02-bootstrap.md` | `go.mod`, `Startup/` (main, config from env, slog, DI wiring, router, `/health`, graceful shutdown), `.env.example`. *(Makefile/Taskfile dropped: `make`/`task` not installed; commands documented in README/AGENTS.)* | — |
 | 03 | `03-domain.md` | `Domain/`: `Money`, `Currency`, IDs, `Transaction`, `Bet`, statuses and state transitions, domain errors, **ports** (repository interfaces, `WalletClient`, `Clock`, `IDGenerator`). Unit tests. | 02 |
 | 04 | `04-persistence.md` | PostgreSQL schema + migrations, seed of the 4 players (bcrypt hashes), repositories in `Persistence/`, unit-of-work / tx helper, locking primitive. Integration tests (optional, testcontainers). | 03 |
 | 05 | `05-wallet-client.md` | HTTP Wallet client in `Shared/wallet`: timeouts, `x-api-key`, error mapping to *applied / not applied / unknown*, logging. Fake wallet in `Domain/domaintest` for tests. | 01, 03 |
@@ -181,6 +181,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 
 ## 8. Prerequisites on the developer machine
 
-- Go (latest stable) — **not installed yet on this machine**.
+- Go (latest stable, **64-bit**) — installed: go1.27.3 windows/amd64. (A 32-bit
+  install was replaced: it lacks the race detector needed in later phases.)
 - Docker Desktop (installed) — needed for the Wallet mock and PostgreSQL.
 - Git (installed).
