@@ -75,7 +75,7 @@ func TestParseMoney_InvalidText_ReturnsInvalidAmount(t *testing.T) {
 		{name: "too many decimal places", input: "1.123"},
 		{name: "NAN", input: "NaN"},
 		{name: "infinity", input: "Inf"},
-		{name: "decimal comma", input: "-1,123"},
+		{name: "decimal comma", input: "10,12"},
 		{name: "non-numeric", input: "abc"},
 		{name: "surrounding spaces", input: " 10 "},
 		{name: "empty string", input: ""},
@@ -93,5 +93,87 @@ func TestParseMoney_InvalidText_ReturnsInvalidAmount(t *testing.T) {
 
 			assertErrorIs(t, err, ErrInvalidAmount)
 		})
+	}
+}
+
+func TestMoney_ZeroAmount_IsZero(t *testing.T) {
+	var zeroMoney = givenAParsedMoney(t, "0")
+
+	assertTrue(t, zeroMoney.IsZero(), "expected zeroMoney to be zero")
+}
+
+func TestMoney_ZeroValue_IsZeroWithTwoDecimals(t *testing.T) {
+	var result Money
+
+	assertStringEquals(t, result.String(), "0.00", "zero value of Money should print 0.00")
+}
+
+func TestMoney_OneUnit_IsPositive(t *testing.T) {
+	var positiveMoney = givenAParsedMoney(t, "1")
+
+	assertTrue(t, positiveMoney.IsPositive(), "expected positiveMoney to be positive")
+}
+
+func TestMoney_OneCent_IsPositive(t *testing.T) {
+	var oneCentMoney = givenAParsedMoney(t, "0.01")
+
+	assertTrue(t, oneCentMoney.IsPositive(), "expected oneCentMoney to be positive")
+}
+
+func TestMoney_Zero_IsNotPositive(t *testing.T) {
+	var zeroMoney = givenAParsedMoney(t, "0")
+
+	assertFalse(t, zeroMoney.IsPositive(), "expected zeroMoney to not be positive")
+}
+
+func TestMoney_DifferentValues_AreNotEqual(t *testing.T) {
+	var money1 = givenAParsedMoney(t, "1.0")
+	var money2 = givenAParsedMoney(t, "2.0")
+
+	assertFalse(t, money1.Equal(money2), "expected money1 and money2 to not be equal")
+}
+
+func TestMoney_StringWithOneDecimal_PadsToTwoDecimals(t *testing.T) {
+	var money = givenAParsedMoney(t, "1.0")
+
+	assertStringEquals(t, money.String(), "1.00", "expected money string to be padded to two decimals")
+}
+
+func TestMoney_SameValues_DifferentScales_AreEqual(t *testing.T) {
+	var money1 = givenAParsedMoney(t, "1.0")
+	var money2 = givenAParsedMoney(t, "1.00")
+
+	assertTrue(t, money1.Equal(money2), "expected money1 and money2 to be equal")
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+func givenAParsedMoney(t *testing.T, value string) Money {
+	t.Helper()
+	money, err := ParseMoney(value)
+	if err != nil {
+		t.Fatalf("invalid money literal %q in test: %v", value, err)
+	}
+	return money
+}
+
+func assertTrue(t *testing.T, condition bool, message string) {
+	t.Helper()
+	if !condition {
+		t.Errorf("Assertion failed: %s", message)
+	}
+}
+
+func assertFalse(t *testing.T, condition bool, message string) {
+	t.Helper()
+	if condition {
+		t.Errorf("Assertion failed: %s", message)
+	}
+}
+
+func assertStringEquals(t *testing.T, actual string, expected string, message string) {
+	t.Helper()
+	if actual != expected {
+		t.Errorf("Assertion failed: %q, expected: %q, actual: %q", message, expected, actual)
 	}
 }
