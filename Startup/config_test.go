@@ -19,19 +19,6 @@ func TestLoadConfig_NoVariablesSet_UsesDefaults(t *testing.T) {
 	assertConfigEqual(t, got, err, expected)
 }
 
-func TestLoadConfig_HTTPPortSet_UsesValue(t *testing.T) {
-	expected := Config{
-		HTTPPort:        9090,
-		LogLevel:        slog.LevelInfo,
-		ShutdownTimeout: 10 * time.Second,
-	}
-	setEnv(t, map[string]string{"HTTP_PORT": "9090"})
-
-	got, err := LoadConfig()
-
-	assertConfigEqual(t, got, err, expected)
-}
-
 func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
 	testCases := []struct {
 		name string
