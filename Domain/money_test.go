@@ -168,6 +168,42 @@ func TestMoney_UnmarshalJSON_ReadsNumber(t *testing.T) {
 	assertStringEquals(t, result.Amount.String(), "10.50", "money should be read from a JSON number")
 }
 
+func TestMoney_UnmarshalJSON_InvalidValue_ReturnsInvalidAmount(t *testing.T) {
+	testCases := []struct {
+		name string
+		body string
+	}{
+		{name: "string instead of number", body: `{"amount":"10.50"}`},
+		{name: "null", body: `{"amount":null}`},
+		{name: "negative", body: `{"amount":-1}`},
+		{name: "three decimals", body: `{"amount":1.005}`},
+		{name: "huge exponent", body: `{"amount":1e400}`},
+		{name: "boolean", body: `{"amount":true}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var result amountPayload
+
+			err := json.Unmarshal([]byte(testCase.body), &result)
+
+			assertErrorIs(t, err, ErrInvalidAmount)
+		})
+	}
+}
+
+func TestMoney_JSONRoundTrip_KeepsExactValue(t *testing.T) {
+	original := amountPayload{Amount: givenAParsedMoney(t, "9000000000.09")}
+	var result amountPayload
+
+	encoded, err := json.Marshal(original)
+	assertNoError(t, err)
+	err = json.Unmarshal(encoded, &result)
+
+	assertNoError(t, err)
+	assertTrue(t, result.Amount.Equal(original.Amount), "money should keep its exact value after a JSON round trip")
+}
+
 ////////////////////////////////////////////////////////////////////////////
 
 func givenAParsedMoney(t *testing.T, value string) Money {
