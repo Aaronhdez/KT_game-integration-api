@@ -14,9 +14,9 @@ func TestLoadConfig_NoVariablesSet_UsesDefaults(t *testing.T) {
 	}
 	setEnv(t, map[string]string{})
 
-	got, err := LoadConfig()
+	result, err := LoadConfig()
 
-	assertConfigEqual(t, got, err, expected)
+	assertConfigEqual(t, result, err, expected)
 }
 
 func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
@@ -75,7 +75,7 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			env:  map[string]string{"SHUTDOWN_TIMEOUT": "-1s"},
 		},
 		{
-			name: "port zero fails",
+			name: "port zero",
 			env:  map[string]string{"HTTP_PORT": "0"},
 		},
 	}
@@ -84,10 +84,10 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			setEnv(t, testCase.env)
 
-			got, err := LoadConfig()
+			result, err := LoadConfig()
 
 			if err == nil {
-				t.Fatalf("expected an error for test case %q, got config %+v", testCase.name, got)
+				t.Fatalf("expected an error for test case %q, got config %+v", testCase.name, result)
 			}
 		})
 	}
