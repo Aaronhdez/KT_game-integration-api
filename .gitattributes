@@ -1,0 +1,3 @@
+# Normalise line endings: text files are stored and checked out with LF.
+# gofmt requires LF in .go files, and the Docker images are Linux.
+* text=auto eol=lf
