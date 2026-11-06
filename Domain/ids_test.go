@@ -7,7 +7,7 @@ import (
 
 const maxLength = 128
 
-func TestCasesIds_ParseProviderTransactionID_ValidCases(t *testing.T) {
+func TestCases_ParseProviderTransactionID_ValidValue_IsAccepted(t *testing.T) {
 	testCases := []struct {
 		name  string
 		input string
@@ -26,7 +26,7 @@ func TestCasesIds_ParseProviderTransactionID_ValidCases(t *testing.T) {
 	}
 }
 
-func TestCasesIds_ParseProviderTransactionID_InvalidCases(t *testing.T) {
+func TestCases_InvalidValue_ReturnsInvalidProviderTransactionID(t *testing.T) {
 	testCases := []struct {
 		name  string
 		input string
