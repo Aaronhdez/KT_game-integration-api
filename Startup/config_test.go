@@ -66,6 +66,42 @@ func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
+	testCases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{
+			name: "invalid HTTP port",
+			env:  map[string]string{"HTTP_PORT": "abc"},
+		},
+		{
+			name: "unknown log level",
+			env:  map[string]string{"LOG_LEVEL": "verbose"},
+		},
+		{
+			name: "shutdown timeout without unit",
+			env:  map[string]string{"SHUTDOWN_TIMEOUT": "10"},
+		},
+		{
+			name: "negative shutdown timeout",
+			env:  map[string]string{"SHUTDOWN_TIMEOUT": "-1s"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			setEnv(t, testCase.env)
+
+			_, err := LoadConfig()
+
+			if err == nil {
+				t.Fatalf("expected an error for test case %q, got nil", testCase.name)
+			}
+		})
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
