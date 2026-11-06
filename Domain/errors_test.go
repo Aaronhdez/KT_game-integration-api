@@ -68,6 +68,13 @@ var allCategories = []error{
 	ErrInsufficientFunds, ErrWalletFailure, ErrWalletTimeout,
 }
 
+func assertNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
 func assertErrorIs(t *testing.T, err, target error) {
 	t.Helper()
 	if !errors.Is(err, target) {
