@@ -17,7 +17,7 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-// RequestLogger is a middleware that logs HTTP requests including method, path, status, and duration.
+// RequestLogger is a middleware that logs HTTP requests including method, path, status, and duration in milliseconds.
 func RequestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +28,7 @@ func RequestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,
-				"duration", time.Since(start),
+				"duration_ms", time.Since(start).Milliseconds(),
 			)
 		})
 }
