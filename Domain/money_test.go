@@ -6,7 +6,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func TestMoney_ValidValues(t *testing.T) {
+func TestMoneyFromDecimal_ValidAmount_IsAccepted(t *testing.T) {
 	testCases := []struct {
 		name  string
 		value decimal.Decimal
@@ -14,8 +14,9 @@ func TestMoney_ValidValues(t *testing.T) {
 		{name: "zero amount", value: decimal.NewFromInt(0)},
 		{name: "valid amount", value: decimal.NewFromInt(1)},
 		{name: "valid amount with decimal", value: decimal.RequireFromString("1.12")},
-		{name: "valid amount with maximum value", value: decimal.RequireFromString("999999999999999999")},
-		{name: "valid amount with minimum value", value: decimal.RequireFromString("0.01")},
+		{name: "maximum valid amount", value: decimal.RequireFromString("999999999999999999.99")},
+		{name: "one cent", value: decimal.RequireFromString("0.01")},
+		{name: "trailing zero beyond two decimals", value: decimal.RequireFromString("1.100")},
 	}
 
 	for _, testCase := range testCases {
@@ -27,25 +28,21 @@ func TestMoney_ValidValues(t *testing.T) {
 	}
 }
 
-func TestMoney_NegativeAmount(t *testing.T) {
-	negative := decimal.NewFromInt(-1)
+func TestMoneyFromDecimal_InvalidAmount_ReturnsInvalidAmount(t *testing.T) {
+	testCases := []struct {
+		name  string
+		value decimal.Decimal
+	}{
+		{name: "negative amount", value: decimal.NewFromInt(-1)},
+		{name: "exceeds upper limit", value: decimal.RequireFromString("1000000000000000000")},
+		{name: "too many decimal places", value: decimal.RequireFromString("1.123")},
+	}
 
-	_, err := MoneyFromDecimal(negative)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := MoneyFromDecimal(testCase.value)
 
-	assertErrorIs(t, err, ErrInvalidAmount)
-}
-
-func TestMoney_ExceedsUpperLimit(t *testing.T) {
-
-	_, err := MoneyFromDecimal(decimal.RequireFromString("1000000000000000000"))
-
-	assertErrorIs(t, err, ErrInvalidAmount)
-}
-
-func TestMoney_TooManyDecimalPlaces(t *testing.T) {
-	tooManyDecimals := decimal.RequireFromString("1.123")
-
-	_, err := MoneyFromDecimal(tooManyDecimals)
-
-	assertErrorIs(t, err, ErrInvalidAmount)
+			assertErrorIs(t, err, ErrInvalidAmount)
+		})
+	}
 }

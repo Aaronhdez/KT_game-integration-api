@@ -6,15 +6,15 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Money represents a monetary amount with a fixed number of decimal places.
+// Money represents a non-negative monetary amount with up to two decimal places.
 type Money struct {
 	amount decimal.Decimal
 }
 
 const moneyMaxDecimals = 2
-const moneyMaxIntegers = 18
+const moneyMaxIntegersDigits = 18
 
-var moneyUpperLimit = decimal.New(1, moneyMaxIntegers)
+var moneyUpperLimit = decimal.New(1, moneyMaxIntegersDigits)
 
 func MoneyFromDecimal(amount decimal.Decimal) (Money, error) {
 	if amount.GreaterThanOrEqual(moneyUpperLimit) {
