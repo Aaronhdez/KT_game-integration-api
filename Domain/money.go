@@ -12,10 +12,11 @@ type Money struct {
 }
 
 const moneyMaxDecimals = 2
-const moneyMaxIntegersDigits = 18
+const moneyMaxIntegerDigits = 18
 
-var moneyUpperLimit = decimal.New(1, moneyMaxIntegersDigits)
+var moneyUpperLimit = decimal.New(1, moneyMaxIntegerDigits)
 
+// MoneyFromDecimal creates a Money instance from a decimal.Decimal value.
 func MoneyFromDecimal(amount decimal.Decimal) (Money, error) {
 	if amount.GreaterThanOrEqual(moneyUpperLimit) {
 		return Money{}, fmt.Errorf("%w: %s exceeds upper limit", ErrInvalidAmount, amount)
@@ -27,4 +28,12 @@ func MoneyFromDecimal(amount decimal.Decimal) (Money, error) {
 		return Money{}, fmt.Errorf("%w: %s has too many decimal places", ErrInvalidAmount, amount)
 	}
 	return Money{amount: amount}, nil
+}
+
+func ParseMoney(value string) (Money, error) {
+	amount, err := decimal.NewFromString(value)
+	if err != nil {
+		return Money{}, fmt.Errorf("%w: %q is not a valid decimal", ErrInvalidAmount, value)
+	}
+	return MoneyFromDecimal(amount)
 }
