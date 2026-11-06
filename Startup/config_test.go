@@ -1,0 +1,111 @@
+package main
+
+import (
+	"log/slog"
+	"testing"
+	"time"
+)
+
+func TestLoadConfig_NoVariablesSet_UsesDefaults(t *testing.T) {
+	expected := Config{
+		HTTPPort:        8080,
+		LogLevel:        slog.LevelInfo,
+		ShutdownTimeout: 10 * time.Second,
+	}
+	setEnv(t, map[string]string{})
+
+	got, err := LoadConfig()
+
+	assertConfigEqual(t, got, err, expected)
+}
+
+func TestLoadConfig_HTTPPortSet_UsesValue(t *testing.T) {
+	expected := Config{
+		HTTPPort:        9090,
+		LogLevel:        slog.LevelInfo,
+		ShutdownTimeout: 10 * time.Second,
+	}
+	setEnv(t, map[string]string{"HTTP_PORT": "9090"})
+
+	got, err := LoadConfig()
+
+	assertConfigEqual(t, got, err, expected)
+}
+
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    Config
+		wantErr bool
+	}{
+		{
+			name: "log level is case-insensitive",
+			env:  map[string]string{"LOG_LEVEL": "WARN"},
+			want: Config{HTTPPort: 8080, LogLevel: slog.LevelWarn, ShutdownTimeout: 10 * time.Second},
+		},
+		{
+			name:    "port that is not a number fails",
+			env:     map[string]string{"HTTP_PORT": "abc"},
+			wantErr: true,
+		},
+		{
+			name:    "port zero fails",
+			env:     map[string]string{"HTTP_PORT": "0"},
+			wantErr: true,
+		},
+		{
+			name:    "unknown log level fails",
+			env:     map[string]string{"LOG_LEVEL": "verbose"},
+			wantErr: true,
+		},
+		{
+			name:    "shutdown timeout without unit fails",
+			env:     map[string]string{"SHUTDOWN_TIMEOUT": "10"},
+			wantErr: true,
+		},
+		{
+			name:    "negative shutdown timeout fails",
+			env:     map[string]string{"SHUTDOWN_TIMEOUT": "-1s"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setEnv(t, tt.env)
+
+			got, err := LoadConfig()
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got config %+v", got)
+				}
+				return
+			}
+			assertConfigEqual(t, got, err, tt.want)
+		})
+	}
+}
+
+func setEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	// Start every case from a clean environment: empty means "unset".
+	// t.Setenv restores the previous value when the test ends.
+	for _, key := range []string{"HTTP_PORT", "LOG_LEVEL", "SHUTDOWN_TIMEOUT"} {
+		t.Setenv(key, "")
+	}
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+}
+
+func assertConfigEqual(t *testing.T, got Config, err error, want Config) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
