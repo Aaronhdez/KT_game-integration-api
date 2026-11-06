@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	application "github.com/aaronhdez/game-integration-api/Application"
+	application "github.com/aaronhdez/kt_game-integration-api/Application"
 )
 
 func NewRouter(logger *slog.Logger) http.Handler {

@@ -1,3 +1,3 @@
-module github.com/aaronhdez/game-integration-api
+module github.com/aaronhdez/kt_game-integration-api
 
 go 1.27.3

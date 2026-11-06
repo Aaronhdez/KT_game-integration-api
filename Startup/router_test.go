@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	application "github.com/aaronhdez/game-integration-api/Application"
+	application "github.com/aaronhdez/kt_game-integration-api/Application"
 )
 
 func TestRouter_GetHealth_ReturnsStatusOK(t *testing.T) {

@@ -41,7 +41,7 @@ race tests can run in CI on Linux in Phase 13. Decided then, not now.)
 
 | Decision | Why | Rejected alternative |
 |---|---|---|
-| Module path `github.com/aaronhdez/game-integration-api` | Conventional `host/user/repo`, lowercase (module paths are case-sensitive and the community uses lowercase); works even if the repo is never pushed. | `github.com/Aaronhdez/…` (mixed case); a short name like `gameapi` (no domain, not fetchable, unusual); another host (repo goes to GitHub). |
+| Module path `github.com/aaronhdez/game-integration-api` *(later `…/kt_game-integration-api`, see "As built")* | Conventional `host/user/repo`, lowercase (module paths are case-sensitive and the community uses lowercase); works even if the repo is never pushed. | `github.com/Aaronhdez/…` (mixed case); a short name like `gameapi` (no domain, not fetchable, unusual); another host (repo goes to GitHub). |
 | `package main` lives directly in `Startup/` → run with `go run ./Startup` | Matches `ARCHITECTURE.md` (Startup = composition root ≈ `Program.cs`). | `cmd/api/main.go` (the common Go layout, but contradicts our agreed folders). |
 | Config, logger, router and server are **files of `package main`** in `Startup/` (`config.go`, `logger.go`, `router.go`, `main.go`), not subpackages | Fewer packages to learn on day one; files in the same package see each other with no imports. Can be split later if it grows. | `Startup/config`, `Startup/server` subpackages (more imports and exported names for no gain yet). |
 | Config only reads the variables **used in this phase**: `HTTP_PORT`, `LOG_LEVEL`, `SHUTDOWN_TIMEOUT` | Each phase adds its own (`DATABASE_URL` in 04, `WALLET_*` in 05, `JWT_*` in 06). Reading required secrets now would make the service fail to start for values nobody uses yet. | Loading the whole `.env.example` now. |
@@ -229,6 +229,9 @@ For every step, before committing:
 
 1. ~~**Module path**~~ **Resolved:** `github.com/aaronhdez/game-integration-api`
    (lowercase, by Go convention; the repo is expected to be delivered via GitHub).
+   **Changed after the phase** to `github.com/aaronhdez/kt_game-integration-api`
+   to match the actual repository, `github.com/Aaronhdez/KT_game-integration-api`
+   (still lowercase).
 2. ~~**Wrong method on an existing path**~~ **Resolved (step 7):** verified that
    once the catch-all `"/"` is registered it also matches wrong methods, so
    `POST /health` returns `404 {"code":"NOT_FOUND",…}` instead of the mux's
@@ -259,6 +262,7 @@ For every step, before committing:
 | Table-driven tests | One test per behaviour, Arrange/Act/one assert, logic in `t.Helper()` helpers; tables only for cases of identical shape | Developer's preference. Shared helpers in `Application/helpers_test.go`. |
 | — | `.gitattributes` (`* text=auto eol=lf`) | VS Code saved `.go` files with CRLF, which `gofmt` rejects. |
 | Makefile/Taskfile (general plan) | None | `make`/`task` not installed; commands in README/AGENTS. |
+| Module `github.com/aaronhdez/game-integration-api` | `github.com/aaronhdez/kt_game-integration-api` | Match the repository name chosen when pushing. |
 
 Not done (optional in the plan): a unit test for `newHTTPServer` (port → `Addr`).
 
