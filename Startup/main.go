@@ -27,38 +27,16 @@ func run() error {
 	}
 
 	logger := setupLogging(cfg)
-	var server *http.Server
-	server = &http.Server{
-		Addr:              ":8080",
-		Handler:           NewRouter(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := newHTTPServer(cfg, NewRouter())
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serverErrors := make(chan error, 1)
-	go func() {
-		logger.Info("http server listening", "addr", server.Addr)
-		serverErrors <- server.ListenAndServe()
-	}()
-	select {
-	case err := <-serverErrors:
-		return fmt.Errorf("http server: %w", err)
-	case <-ctx.Done():
-		logger.Info("shutdown signal received")
+	serverErrors := startServer(server, logger)
+	if err := waitForShutdownSignal(ctx, serverErrors, logger); err != nil {
+		return err
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("http server shutdown: %w", err)
-	}
-	logger.Info("http server stopped")
-	return nil
+	return shutdownServer(server, cfg.ShutdownTimeout, logger)
 }
 
 func setupLogging(cfg Config) *slog.Logger {
@@ -70,4 +48,46 @@ func setupLogging(cfg Config) *slog.Logger {
 	)
 	logger.Debug("debug logging enabled")
 	return logger
+}
+
+func newHTTPServer(cfg Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func startServer(server *http.Server, logger *slog.Logger) <-chan error {
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info("http server starting", "addr", server.Addr)
+		serverErrors <- server.ListenAndServe()
+	}()
+	return serverErrors
+}
+
+func waitForShutdownSignal(ctx context.Context, serverErrors <-chan error, logger *slog.Logger) error {
+	select {
+	case err := <-serverErrors:
+		return fmt.Errorf("http server: %w", err)
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+		return nil
+	}
+}
+
+func shutdownServer(server *http.Server, timeout time.Duration, logger *slog.Logger) error {
+	// Not the signal ctx: it is already cancelled, so Shutdown would not wait at all.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("http server shutdown: %w", err)
+	}
+	logger.Info("http server stopped")
+	return nil
 }
