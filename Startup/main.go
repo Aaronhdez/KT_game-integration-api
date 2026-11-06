@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 )
@@ -14,5 +15,16 @@ func main() {
 
 func run() error {
 	slog.Info("starting game integration api")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	slog.Info("config loaded",
+		"http_port", cfg.HTTPPort,
+		"log_level", cfg.LogLevel.String(),
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
+	)
+
 	return nil
 }
