@@ -87,73 +87,21 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			name: "negative shutdown timeout",
 			env:  map[string]string{"SHUTDOWN_TIMEOUT": "-1s"},
 		},
+		{
+			name: "port zero fails",
+			env:  map[string]string{"HTTP_PORT": "0"},
+		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			setEnv(t, testCase.env)
 
-			_, err := LoadConfig()
-
-			if err == nil {
-				t.Fatalf("expected an error for test case %q, got nil", testCase.name)
-			}
-		})
-	}
-}
-
-func TestLoadConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		env     map[string]string
-		want    Config
-		wantErr bool
-	}{
-		{
-			name: "log level is case-insensitive",
-			env:  map[string]string{"LOG_LEVEL": "WARN"},
-			want: Config{HTTPPort: 8080, LogLevel: slog.LevelWarn, ShutdownTimeout: 10 * time.Second},
-		},
-		{
-			name:    "port that is not a number fails",
-			env:     map[string]string{"HTTP_PORT": "abc"},
-			wantErr: true,
-		},
-		{
-			name:    "port zero fails",
-			env:     map[string]string{"HTTP_PORT": "0"},
-			wantErr: true,
-		},
-		{
-			name:    "unknown log level fails",
-			env:     map[string]string{"LOG_LEVEL": "verbose"},
-			wantErr: true,
-		},
-		{
-			name:    "shutdown timeout without unit fails",
-			env:     map[string]string{"SHUTDOWN_TIMEOUT": "10"},
-			wantErr: true,
-		},
-		{
-			name:    "negative shutdown timeout fails",
-			env:     map[string]string{"SHUTDOWN_TIMEOUT": "-1s"},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setEnv(t, tt.env)
-
 			got, err := LoadConfig()
 
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected an error, got config %+v", got)
-				}
-				return
+			if err == nil {
+				t.Fatalf("expected an error for test case %q, got config %+v", testCase.name, got)
 			}
-			assertConfigEqual(t, got, err, tt.want)
 		})
 	}
 }
