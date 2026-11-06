@@ -32,6 +32,40 @@ func TestLoadConfig_HTTPPortSet_UsesValue(t *testing.T) {
 	assertConfigEqual(t, got, err, expected)
 }
 
+func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
+	testCases := []struct {
+		name string
+		env  map[string]string
+		want Config
+	}{
+		{
+			name: "custom HTTP port",
+			env:  map[string]string{"HTTP_PORT": "9090"},
+			want: Config{HTTPPort: 9090, LogLevel: slog.LevelInfo, ShutdownTimeout: 10 * time.Second},
+		},
+		{
+			name: "custom log level",
+			env:  map[string]string{"LOG_LEVEL": "DEBUG"},
+			want: Config{HTTPPort: 8080, LogLevel: slog.LevelDebug, ShutdownTimeout: 10 * time.Second},
+		},
+		{
+			name: "custom shutdown timeout",
+			env:  map[string]string{"SHUTDOWN_TIMEOUT": "5s"},
+			want: Config{HTTPPort: 8080, LogLevel: slog.LevelInfo, ShutdownTimeout: 5 * time.Second},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			setEnv(t, testCase.env)
+
+			result, err := LoadConfig()
+
+			assertConfigEqual(t, result, err, testCase.want)
+		})
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
