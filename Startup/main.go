@@ -27,7 +27,7 @@ func run() error {
 	}
 
 	logger := setupLogging(cfg)
-	server := newHTTPServer(cfg, NewRouter())
+	server := newHTTPServer(cfg, NewRouter(logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -50,10 +50,10 @@ func setupLogging(cfg Config) *slog.Logger {
 	return logger
 }
 
-func newHTTPServer(cfg Config, handler http.Handler) *http.Server {
+func newHTTPServer(cfg Config, router http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler:           handler,
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
