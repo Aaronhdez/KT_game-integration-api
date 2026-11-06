@@ -1,10 +1,15 @@
 package domain
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/shopspring/decimal"
 )
+
+type amountPayload struct {
+	Amount Money `json:"amount"`
+}
 
 func TestMoneyFromDecimal_ValidAmount_IsAccepted(t *testing.T) {
 	testCases := []struct {
@@ -144,6 +149,23 @@ func TestMoney_SameValues_DifferentScales_AreEqual(t *testing.T) {
 	var money2 = givenAParsedMoney(t, "1.00")
 
 	assertTrue(t, money1.Equal(money2), "expected money1 and money2 to be equal")
+}
+
+func TestMoney_MarshalJSON_WritesNumberWithTwoDecimals(t *testing.T) {
+	var payload = amountPayload{Amount: givenAParsedMoney(t, "10.5")}
+	result, err := json.Marshal(payload)
+
+	assertNoError(t, err)
+	assertStringEquals(t, string(result), `{"amount":10.50}`, "money should be written as a JSON number with two decimals")
+}
+
+func TestMoney_UnmarshalJSON_ReadsNumber(t *testing.T) {
+	var result amountPayload
+
+	err := json.Unmarshal([]byte(`{"amount":10.50}`), &result)
+
+	assertNoError(t, err)
+	assertStringEquals(t, result.Amount.String(), "10.50", "money should be read from a JSON number")
 }
 
 ////////////////////////////////////////////////////////////////////////////

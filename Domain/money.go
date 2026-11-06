@@ -58,3 +58,16 @@ func (m Money) Decimal() decimal.Decimal {
 func (m Money) String() string {
 	return m.amount.StringFixed(moneyMaxDecimals)
 }
+
+func (m *Money) UnmarshalJSON(data []byte) error {
+	parsedMoney, err := ParseMoney(string(data))
+	if err != nil {
+		return err
+	}
+	*m = parsedMoney
+	return nil
+}
+
+func (m Money) MarshalJSON() ([]byte, error) {
+	return []byte(m.String()), nil
+}
