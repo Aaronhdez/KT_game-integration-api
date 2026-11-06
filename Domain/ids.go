@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-const maxStringLength = 128
+const maxProviderTransactionIDLength = 128
 
 // ID types for various entities in the domain
 
@@ -22,11 +22,12 @@ type TransactionID string
 // ProviderTransactionID represents the unique identifier for a provider transaction.
 type ProviderTransactionID string
 
+// ParseProviderTransactionID validates and parses a string into a ProviderTransactionID. It ensures the value is not empty and does not exceed the maximum allowed length.
 func ParseProviderTransactionID(value string) (ProviderTransactionID, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("%w: must not be empty", ErrInvalidProviderTransactionID)
 	}
-	if utf8.RuneCountInString(value) > maxStringLength {
+	if utf8.RuneCountInString(value) > maxProviderTransactionIDLength {
 		return "", fmt.Errorf("%w: too long", ErrInvalidProviderTransactionID)
 	}
 	return ProviderTransactionID(value), nil
