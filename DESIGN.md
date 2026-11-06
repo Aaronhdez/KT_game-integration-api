@@ -30,6 +30,22 @@
 
 *Filled in progressively.*
 
+**Logging (Phase 02).** Logs are JSON lines on stdout (`log/slog`), level from
+`LOG_LEVEL`. Every HTTP request produces one line with `method`, `path`,
+`status` and `duration_ms`. The request log deliberately records only the URL
+**path**: never the query string, headers or bodies, because those carry the JWT,
+passwords and other secrets. Configuration is logged at startup without secrets.
+
+**Unknown routes and wrong methods (Phase 02).** Both return
+`404 {"code":"NOT_FOUND",…}`, so every error keeps the same JSON shape. The
+standard router would answer a wrong method with a plain-text `405`, but the
+catch-all route that produces the JSON `404` also captures wrong methods, and the
+assessment defines no "method not allowed" error code.
+
+**Graceful shutdown (Phase 02).** On Ctrl+C / `SIGTERM` the server stops
+accepting connections and waits up to `SHUTDOWN_TIMEOUT` for in-flight requests,
+so an operation is not cut in the middle of a Wallet call by a normal restart.
+
 Known Wallet behaviours we rely on or work around (from
 [`docs/wallet-findings.md`](docs/wallet-findings.md)):
 

@@ -114,12 +114,15 @@ implementation. Never let `Domain`, `Actions` or `Queries` import `net/http`,
 
 ## Commands
 
-> Filled in during Phase 02/12. Expected:
-
 ```bash
+gofmt -l .                          # must print nothing (files must use LF; see .gitattributes)
+go vet ./...
 go build ./...
 go test ./...
-go test -tags=integration ./...
-docker compose up --build
-docker compose down -v
+go run ./Startup                    # serves on :8080; GET /health
+go list -f '{{.GoFiles}}' ./...     # check no test helpers leaked into production files
 ```
+
+> Not available yet: `go test -tags=integration ./...` (Phase 04),
+> `docker compose up --build` / `docker compose down -v` (Phase 12).
+> There is no Makefile: `make` is not installed on the developer's Windows machine.
