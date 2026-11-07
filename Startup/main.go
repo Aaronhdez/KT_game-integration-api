@@ -12,7 +12,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	actions "github.com/aaronhdez/kt_game-integration-api/Actions"
+	application "github.com/aaronhdez/kt_game-integration-api/Application"
 	persistence "github.com/aaronhdez/kt_game-integration-api/Persistence"
+	"github.com/aaronhdez/kt_game-integration-api/Shared/clock"
+	"github.com/aaronhdez/kt_game-integration-api/Shared/password"
+	"github.com/aaronhdez/kt_game-integration-api/Shared/token"
 )
 
 const (
@@ -47,7 +52,7 @@ func run() error {
 		return err
 	}
 
-	server := newHTTPServer(cfg, NewRouter(logger))
+	server := newHTTPServer(cfg, NewRouter(logger, newHandlers(cfg, pool, logger)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -103,6 +108,18 @@ func migrateDatabase(pool *pgxpool.Pool, logger *slog.Logger) error {
 	}
 	logger.Info("database migrations applied", "applied_versions", applied)
 	return nil
+}
+
+// newHandlers is the dependency wiring: it builds each endpoint with its real
+// adapters. This is the only place that knows every concrete type.
+func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
+	players := persistence.NewPlayerRepository(pool)
+	tokens := token.NewJWT([]byte(cfg.JWTSecret), cfg.JWTTTL)
+	login := actions.NewLoginCommandHandler(players, password.NewBcrypt(), tokens, clock.System{})
+
+	return Handlers{
+		Login: application.NewLoginController(login, logger),
+	}
 }
 
 func newHTTPServer(cfg Config, router http.Handler) *http.Server {
