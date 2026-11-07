@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -226,7 +227,47 @@ func TestWithdraw_SlowerThanTimeout_IsUnknown(t *testing.T) {
 	assertErrorIs(t, err, domain.ErrWalletOutcomeUnknown)
 }
 
+// The real Wallet closes the connection without answering when a request takes
+// ~5 s, sometimes after applying it (docs/wallet-findings.md, Q6).
+func TestWithdraw_DroppedConnection_IsUnknown(t *testing.T) {
+	server, _ := givenAWalletDroppingConnections(t)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertErrorIs(t, err, domain.ErrWalletOutcomeUnknown)
+}
+
+// Re-sending is the resolution mechanism of Phase 11, done later and on
+// purpose; an immediate automatic retry could race the original request.
+func TestWithdraw_DroppedConnection_IsNotRetried(t *testing.T) {
+	server, requests := givenAWalletDroppingConnections(t)
+	client := newTestClient(server)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertRequestCount(t, requests, 1)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// givenAWalletDroppingConnections starts a fake Wallet that closes every
+// connection without sending a response. It also counts the requests it gets.
+func givenAWalletDroppingConnections(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	requests := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		connection, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack connection: %v", err)
+			return
+		}
+		connection.Close()
+	}))
+	t.Cleanup(server.Close)
+	return server, requests
+}
 
 // givenASlowWallet starts a fake Wallet that waits for delay before answering
 // with a valid balance. It stops waiting if the client gives up, so the test
@@ -347,6 +388,13 @@ func assertBody(t *testing.T, sent *sentRequest, err error, want string) {
 	assertNoError(t, err)
 	if sent.body != want {
 		t.Errorf("expected body\n  %s\ngot\n  %s", want, sent.body)
+	}
+}
+
+func assertRequestCount(t *testing.T, requests *atomic.Int32, want int32) {
+	t.Helper()
+	if result := requests.Load(); result != want {
+		t.Errorf("expected %d request(s) to the Wallet, got %d", want, result)
 	}
 }
 
