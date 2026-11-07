@@ -46,6 +46,10 @@ type Client struct {
 	logger     *slog.Logger
 }
 
+// Client must satisfy the port the use cases depend on; the build fails if it
+// stops doing so.
+var _ domain.WalletClient = (*Client)(nil)
+
 // NewClient creates a new instance of Client with the provided configuration and logger.
 func NewClient(config Config, logger *slog.Logger) *Client {
 	return &Client{
@@ -65,25 +69,6 @@ func (client *Client) Withdraw(ctx context.Context, operation domain.WalletOpera
 // domain.WalletClient describes.
 func (client *Client) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
 	return client.operate(ctx, depositPath, "deposit", operation)
-}
-
-// Balance retrieves the wallet balance for the specified user.
-// It will retry once if the first attempt fails due to a retryable error.
-func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
-	for attempt := 1; ; attempt++ {
-		start := time.Now()
-		result := client.readBalance(ctx, userID)
-		logBalanceRead(client.logger, userID, attempt, result, time.Since(start))
-		if result.err == nil || !result.retryable || attempt == balanceAttempts {
-			return result.balance, result.err
-		}
-
-		select {
-		case <-time.After(balanceRetryPause):
-		case <-ctx.Done():
-			return result.balance, result.err
-		}
-	}
 }
 
 func (client *Client) operate(ctx context.Context, path string, name string, operation domain.WalletOperation) (domain.Money, error) {
@@ -239,6 +224,25 @@ func describeOutcome(err error) (string, slog.Level) {
 		return "rejected", slog.LevelError
 	default:
 		return "unknown", slog.LevelWarn
+	}
+}
+
+// Balance retrieves the wallet balance for the specified user.
+// It will retry once if the first attempt fails due to a retryable error.
+func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
+	for attempt := 1; ; attempt++ {
+		start := time.Now()
+		result := client.readBalance(ctx, userID)
+		logBalanceRead(client.logger, userID, attempt, result, time.Since(start))
+		if result.err == nil || !result.retryable || attempt == balanceAttempts {
+			return result.balance, result.err
+		}
+
+		select {
+		case <-time.After(balanceRetryPause):
+		case <-ctx.Done():
+			return result.balance, result.err
+		}
 	}
 }
 
