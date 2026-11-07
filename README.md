@@ -41,15 +41,20 @@ docker run --rm -d --name gameapi-db -p 5432:5432 \
   postgres:16-alpine
 ```
 
-`DATABASE_URL` is the only required variable; every other one has a default:
+`DATABASE_URL` and `WALLET_API_KEY` are the only required variables; every
+other one has a default:
 
 ```bash
-DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable" go run ./Startup
+export DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"
+export WALLET_API_KEY="<the key in .env.example>"
+go run ./Startup
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
 
 In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`
-then `go run ./Startup`. If the database cannot be reached within 10 seconds the
+and `$env:WALLET_API_KEY="<the key in .env.example>"`, then `go run ./Startup`.
+To reach a Wallet started on your machine also set
+`WALLET_BASE_URL=http://localhost:8000` (the default is the Docker Compose host name). If the database cannot be reached within 10 seconds the
 service exits with code 1. Stop the container with `docker stop gameapi-db`
 (`--rm` deletes it, and its data, when it stops).
 
@@ -104,9 +109,10 @@ An invalid value stops the service at startup with an error naming the variable.
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (case-insensitive) | `info` | Phase 02 |
 | `SHUTDOWN_TIMEOUT` | Max time to finish in-flight requests on shutdown (Go duration: `500ms`, `10s`, `1m`) | `10s` | Phase 02 |
 | `DATABASE_URL` | PostgreSQL connection string (**required**). Pool options such as `pool_max_conns=10` can be added as URL parameters | — | Phase 04 |
-| `WALLET_BASE_URL` | Wallet base URL | `http://wallet:8000` | Phase 05 |
-| `WALLET_API_KEY` | Wallet `x-api-key` header | — | Phase 05 |
-| `WALLET_TIMEOUT` | Timeout per Wallet call | `3s` | Phase 05 |
+| `WALLET_BASE_URL` | Wallet base URL (absolute `http`/`https` URL) | `http://wallet:8000` | Phase 05 |
+| `WALLET_API_KEY` | Wallet `x-api-key` header (**required**; the mock's key is in `.env.example`) | — | Phase 05 |
+| `WALLET_OPERATION_TIMEOUT` | Timeout per withdraw/deposit call to the Wallet | `6s` | Phase 05 |
+| `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` | Phase 05 |
 | `JWT_SECRET` | HMAC secret to sign JWTs | — | Phase 06 |
 | `JWT_TTL` | Token lifetime | `1h` | Phase 06 |
 
