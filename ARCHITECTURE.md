@@ -133,3 +133,37 @@ PlayerRepository (FindByUsername, FindByID)                          // standalo
   `wallet_user_id`, so another player's bet or transaction is "not found".
 - **Money** is written as text (`Money.String()`) and read as `amount::text` →
   `domain.ParseMoney`: exact both ways, and re-validated on every read.
+
+## Wallet client (Phase 05)
+
+`Shared/wallet` (`wallet.Client`, built with `wallet.NewClient(config, logger)`)
+implements `domain.WalletClient` over HTTP; `Domain/domaintest.FakeWallet`
+implements the same port in memory for use-case tests.
+
+```
+                 domain.WalletClient (port, in Domain)
+                    ▲                         ▲
+   Shared/wallet.Client              domaintest.FakeWallet
+   (HTTP, production)                (in memory, tests only)
+```
+
+| File | Content |
+|---|---|
+| `config.go` | `Config{BaseURL, APIKey, OperationTimeout, BalanceTimeout}` |
+| `dto.go` | Wallet JSON shapes (unexported); amounts and balances as `json.Number`, never `float64` |
+| `classify.go` | `classifyOperation(status, code)`: the applied / not applied / unknown table; `isSuccess` |
+| `client.go` | `Withdraw`, `Deposit`, `Balance`, then their helpers in call order; one log line per call |
+
+Withdraw / Deposit result → domain outcome:
+
+| Wallet answer | Returned | Use case will |
+|---|---|---|
+| `2xx` with a valid balance | new balance, `nil` | `COMPLETED` |
+| `2xx` with an unusable body, `409 DuplicatedTransaction` | `ErrWalletAppliedBalanceUnknown` | `COMPLETED` |
+| `400 InsufficientBalance` | `ErrInsufficientFunds` | `FAILED`, 422 |
+| other `400`, `401` | `ErrWalletRejected` | `FAILED`, 502 |
+| `5xx`, other `4xx`, timeout, dropped connection | `ErrWalletOutcomeUnknown` | `PENDING`, 202 |
+
+`Balance` returns `ErrWalletFailure` (502) or `ErrWalletTimeout` (504), after at
+most one retry. The client is not wired into `Startup` yet: its first consumer is
+`GET /player` (Phase 07).
