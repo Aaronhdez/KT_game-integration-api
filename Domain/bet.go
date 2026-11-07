@@ -19,7 +19,7 @@ type Bet struct {
 	ID        BetID
 	UserID    UserID
 	Currency  Currency
-	Stake     Money // lo apostado (el importe del retiro)
+	Stake     Money
 	Status    BetStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
