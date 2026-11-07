@@ -179,6 +179,23 @@ other endpoints. An unknown username and a wrong password get the same `401`.
 In PowerShell use `curl.exe` and escape the inner quotes
 (`-d '{\"username\":\"player_usd\",\"password\":\"usd-pass-2026\"}'`).
 
+### Player information
+
+```bash
+curl -i http://localhost:8080/api/v1/player -H "Authorization: Bearer $TOKEN"
+```
+
+`200` with `Cache-Control: no-store`:
+
+```json
+{"userId":34633089486,"balance":5000.00,"currency":"USD"}
+```
+
+The player comes from the token. The balance is read from the Wallet on every
+request (never cached), so the answer can take several seconds, and the
+unreliable Wallet can make it a `502 WALLET_ERROR` or `504 WALLET_TIMEOUT` —
+just retry. Without a valid token: `401`.
+
 *More `curl` examples and OpenAPI spec: Phase 13.*
 
 ## Resetting the state

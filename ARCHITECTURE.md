@@ -164,8 +164,8 @@ Withdraw / Deposit result → domain outcome:
 | `5xx`, other `4xx`, timeout, dropped connection | `ErrWalletOutcomeUnknown` | `PENDING`, 202 |
 
 `Balance` returns `ErrWalletFailure` (502) or `ErrWalletTimeout` (504), after at
-most one retry. The client is not wired into `Startup` yet: its first consumer is
-`GET /player` (Phase 07).
+most one retry. `Startup` builds one `wallet.Client` (shared by every request,
+safe for concurrent use); its first consumer is `GET /player` (Phase 07).
 
 ## Authentication (Phase 06)
 
@@ -201,13 +201,32 @@ Protected endpoints (from Phase 07)
 `Domain/ports.go` was split by topic into `ports_auth.go`, `ports_persistence.go`,
 `ports_wallet.go` and `ports_system.go` (same package, no declaration changed).
 
+## Player information (Phase 07)
+
+```
+GET /api/v1/player
+  application.RequireAuth          no / invalid token → 401, the Wallet is never called
+    application.PlayerController   user ID from the context, Cache-Control: no-store
+      queries.GetPlayerQueryHandler
+        domain.PlayerRepository    ← persistence.PlayerRepository   unknown → 404
+        domain.WalletClient        ← wallet.Client                  502 / 504; currency mismatch → 502
+```
+
+| Package / file | Content |
+|---|---|
+| `Queries/get_player.go` | `GetPlayerQueryHandler`, `GetPlayerQuery{UserID}`, `PlayerResult{UserID, Balance, Currency}` |
+| `Application/player.go` | `PlayerController` and its `playerResponse` DTO (`userId`, `balance`, `currency`, in that order) |
+| `Startup/main.go`, `router.go` | `wallet.NewClient` from the config; `Handlers.Player` = `RequireAuth(...)(PlayerController)`; route `GET /api/v1/player` |
+
+No per-player lock: the read changes nothing (see `DESIGN.md`).
+
 ### Naming convention
 
 | Layer | Name | Example |
 |---|---|---|
 | `Application` | `XxxController`, one per endpoint, implements `http.Handler` | `LoginController` |
 | `Actions` | `XxxCommandHandler` + `XxxCommand` / `XxxResult` | `LoginCommandHandler` |
-| `Queries` | `XxxQueryHandler` | `GetPlayerQueryHandler` (Phase 07) |
+| `Queries` | `XxxQueryHandler` + `XxxQuery` / `XxxResult` | `GetPlayerQueryHandler` + `GetPlayerQuery` / `PlayerResult` |
 
 "Handler" is reserved for use cases (the MediatR analogy) and "Controller" for
 HTTP, so the two layers never share a name.

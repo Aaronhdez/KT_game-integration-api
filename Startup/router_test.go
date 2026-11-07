@@ -47,18 +47,38 @@ func TestRouter_GetLogin_ReturnsNotFound(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusNotFound)
 }
 
+func TestRouter_GetPlayer_ReachesThePlayerHandler(t *testing.T) {
+	recorder := aGET("/api/v1/player")
+
+	assertStatusCode(t, recorder, playerStubStatus)
+}
+
+func TestRouter_PostPlayer_ReturnsNotFound(t *testing.T) {
+	recorder := aPOST("/api/v1/player")
+
+	assertStatusCode(t, recorder, http.StatusNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
-// loginStubStatus is an unusual status, so a test can tell that the request
-// reached the login stub and not another route.
-const loginStubStatus = http.StatusTeapot
+// Each stub answers an unusual status of its own, so a test can tell which
+// route the request reached.
+const (
+	loginStubStatus  = http.StatusTeapot
+	playerStubStatus = http.StatusAccepted
+)
 
 func stubHandlers() Handlers {
 	return Handlers{
-		Login: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(loginStubStatus)
-		}),
+		Login:  statusStub(loginStubStatus),
+		Player: statusStub(playerStubStatus),
 	}
+}
+
+func statusStub(status int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+	})
 }
 
 func aPOST(path string) *httptest.ResponseRecorder {
