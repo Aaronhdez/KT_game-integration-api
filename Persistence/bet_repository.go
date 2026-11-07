@@ -60,6 +60,14 @@ func (r *BetRepository) Insert(ctx context.Context, bet domain.Bet) error {
 	return nil
 }
 
+func (r *BetRepository) NextID(ctx context.Context) (domain.BetID, error) {
+	var id int64
+	if err := r.db.QueryRow(ctx, "SELECT nextval('bet_id_seq')").Scan(&id); err != nil {
+		return 0, fmt.Errorf("next bet id: %w", err)
+	}
+	return domain.BetID(id), nil
+}
+
 func scanBet(row pgx.Row) (domain.Bet, error) {
 	var (
 		id           int64

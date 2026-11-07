@@ -79,7 +79,49 @@ func TestBetRepository_Insert_UnknownPlayer_ReturnsError(t *testing.T) {
 	assertError(t, err)
 }
 
+func TestBetRepository_NextID_CalledTwice_ReturnsIncreasingIDs(t *testing.T) {
+	repository := NewBetRepository(migratedTestDatabase(t))
+	first := reserveBetID(t, repository)
+
+	result, err := repository.NextID(testContext(t))
+
+	assertBetIDGreaterThan(t, result, err, first)
+}
+
+func TestBetRepository_NextID_AfterBetsWereInserted_ReturnsAnUnusedID(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	existing := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, existing)
+
+	result, err := repository.NextID(testContext(t))
+
+	assertBetIDGreaterThan(t, result, err, existing.ID)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// reserveBetID calls the repository's NextID as setup, failing the test on error.
+func reserveBetID(t *testing.T, repository *BetRepository) domain.BetID {
+	t.Helper()
+	id, err := repository.NextID(testContext(t))
+	if err != nil {
+		t.Fatalf("reserve bet id: %v", err)
+	}
+	return id
+}
+
+// assertBetIDGreaterThan checks only the order, not "+1": a sequence can skip
+// numbers (nextval is never rolled back) and other tests consume IDs too.
+func assertBetIDGreaterThan(t *testing.T, result domain.BetID, err error, previous domain.BetID) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result <= previous {
+		t.Errorf("expected a bet id greater than %d, got %d", previous, result)
+	}
+}
 
 // testNow is "now" at the precision PostgreSQL stores (microseconds), so a
 // time written and read back compares equal.
