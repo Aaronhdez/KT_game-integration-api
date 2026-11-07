@@ -28,7 +28,8 @@ type BetRepository interface {
 // every Find… returns ErrTransactionNotFound when there is no match (including
 // another player's transaction).
 //   - Insert reports duplicates rejected by the database as domain errors:
-//     ErrTransactionExists (same provider transaction ID for the same player),
+//     ErrTransactionExists (the provider transaction ID of a WITHDRAW or
+//     DEPOSIT is already used, by this or any other player: §6.1),
 //     ErrBetAlreadySettled (the bet already has a pending or completed deposit),
 //     ErrAlreadyCancelled (the transaction already has a cancel).
 //   - FindByProviderTransactionID only looks at WITHDRAW and DEPOSIT
