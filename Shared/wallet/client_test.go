@@ -424,6 +424,74 @@ func TestBalance_Success_ReturnsTheBalanceAndCurrency(t *testing.T) {
 	assertWalletBalance(t, result, err, "5000.00", domain.USD)
 }
 
+func TestBalance_GetsTheBalanceOfTheUser(t *testing.T) {
+	server, sent := givenAWalletRecordingRequests(t)
+	client := newTestClient(server)
+
+	_, err := client.Balance(context.Background(), 34633089486)
+
+	assertEndpoint(t, sent, err, http.MethodGet, "/api/v1/balance/34633089486")
+}
+
+func TestBalance_SendsTheAPIKey(t *testing.T) {
+	server, sent := givenAWalletRecordingRequests(t)
+	client := newTestClient(server)
+
+	_, err := client.Balance(context.Background(), 34633089486)
+
+	assertHeader(t, sent, err, "x-api-key", testAPIKey)
+}
+
+// A balance we cannot trust must never be shown to the player: it is a Wallet
+// failure (502), not a zero balance.
+func TestBalance_InvalidResponse_IsWalletFailure(t *testing.T) {
+	testCases := []struct {
+		name string
+		body string
+	}{
+		{name: "unknown user, as the mock answers it", body: `{"balance":"0","currency":""}`},
+		{name: "unsupported currency", body: `{"balance":"10.00","currency":"GBP"}`},
+		{name: "balance with three decimals", body: `{"balance":"10.005","currency":"USD"}`},
+		{name: "negative balance", body: `{"balance":"-1.00","currency":"USD"}`},
+		{name: "missing balance", body: `{"currency":"USD"}`},
+		{name: "invalid JSON", body: `{"balance":`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Balance(context.Background(), 34633089486)
+
+			assertErrorIs(t, err, domain.ErrWalletFailure)
+		})
+	}
+}
+
+// The Money and Currency errors must not leak their category: a bad Wallet
+// answer is never an invalid request from our client.
+func TestBalance_InvalidResponse_IsNotInvalidInput(t *testing.T) {
+	testCases := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid amount", body: `{"balance":"10.005","currency":"USD"}`},
+		{name: "invalid currency", body: `{"balance":"10.00","currency":"GBP"}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Balance(context.Background(), 34633089486)
+
+			assertErrorIsNot(t, err, domain.ErrInvalidInput)
+		})
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // givenAWalletDroppingConnections starts a fake Wallet that closes every
@@ -471,8 +539,8 @@ type sentRequest struct {
 }
 
 // givenAWalletRecordingRequests starts a fake Wallet that stores the request it
-// receives and answers with a valid balance. The stored request can be read
-// once the client call has returned.
+// receives and answers with a valid balance, valid for both operations and
+// balance reads. The stored request can be read once the client call has returned.
 func givenAWalletRecordingRequests(t *testing.T) (*httptest.Server, *sentRequest) {
 	t.Helper()
 	sent := &sentRequest{}
@@ -480,7 +548,7 @@ func givenAWalletRecordingRequests(t *testing.T) (*httptest.Server, *sentRequest
 		body, _ := io.ReadAll(r.Body)
 		*sent = sentRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"balance":"4989.5"}`)
+		io.WriteString(w, `{"balance":"4989.5","currency":"USD"}`)
 	}))
 	t.Cleanup(server.Close)
 	return server, sent
