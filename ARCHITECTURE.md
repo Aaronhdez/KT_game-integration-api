@@ -167,3 +167,48 @@ Withdraw / Deposit result → domain outcome:
 `Balance` returns `ErrWalletFailure` (502) or `ErrWalletTimeout` (504), after at
 most one retry. The client is not wired into `Startup` yet: its first consumer is
 `GET /player` (Phase 07).
+
+## Authentication (Phase 06)
+
+```
+POST /api/v1/auth/login
+  application.LoginController      decode JSON (decodeJSON), map errors (writeDomainError)
+    actions.LoginCommandHandler    empty fields → 400; unknown user → dummy bcrypt + 401
+      domain.PlayerRepository      ← persistence.PlayerRepository
+      domain.PasswordHasher        ← password.Bcrypt          (Shared/password)
+      domain.TokenIssuer           ← token.JWT                (Shared/token)
+      domain.Clock                 ← clock.System             (Shared/clock)
+
+Protected endpoints (from Phase 07)
+  application.RequireAuth(verifier, clock)(controller)
+      domain.TokenVerifier         ← token.JWT
+    controller reads the player with application.UserIDFromContext(r.Context())
+```
+
+| Package / file | Content |
+|---|---|
+| `Domain/ports_auth.go` | `PasswordHasher`, `TokenIssuer` (+ `IssuedToken`), `TokenVerifier` |
+| `Shared/password` | `Bcrypt.Verify`: mismatch or > 72 bytes → `ErrInvalidCredentials`; malformed hash → other error |
+| `Shared/token` | `JWT.Issue` / `JWT.Verify` (HS256, `sub`/`iat`/`exp`); every failure → `ErrInvalidToken` |
+| `Shared/clock` | `System.Now()` in UTC |
+| `Actions/login.go` | `LoginCommandHandler`, `LoginCommand`, `LoginResult`, dummy hash |
+| `Application/login.go` | `LoginController` and its request/response DTOs |
+| `Application/auth.go` | `RequireAuth` middleware, `UserIDFromContext` |
+| `Application/errors.go` | `writeDomainError`: category → status + code; unknown → `500 INTERNAL_ERROR` |
+| `Application/request.go` | `decodeJSON`: one JSON object, max 1 MiB, unknown fields ignored |
+| `Domain/domaintest` | `FixedClock`, `FakePlayerRepository`, `FakePasswordHasher` (+ `FakeHash`), `FakeTokens` |
+| `Startup/router.go`, `main.go` | `Handlers` struct and `newHandlers`: the wiring of every concrete type |
+
+`Domain/ports.go` was split by topic into `ports_auth.go`, `ports_persistence.go`,
+`ports_wallet.go` and `ports_system.go` (same package, no declaration changed).
+
+### Naming convention
+
+| Layer | Name | Example |
+|---|---|---|
+| `Application` | `XxxController`, one per endpoint, implements `http.Handler` | `LoginController` |
+| `Actions` | `XxxCommandHandler` + `XxxCommand` / `XxxResult` | `LoginCommandHandler` |
+| `Queries` | `XxxQueryHandler` | `GetPlayerQueryHandler` (Phase 07) |
+
+"Handler" is reserved for use cases (the MediatR analogy) and "Controller" for
+HTTP, so the two layers never share a name.

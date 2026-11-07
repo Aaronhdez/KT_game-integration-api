@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -9,6 +10,7 @@ import (
 const (
 	testDatabaseURL  = "postgres://user:secret@localhost:5432/db"
 	testWalletAPIKey = "test-wallet-key"
+	testJWTSecret    = "test-jwt-secret-of-at-least-32-bytes"
 )
 
 func TestLoadConfig_OnlyRequiredVariablesSet_UsesDefaults(t *testing.T) {
@@ -59,6 +61,16 @@ func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
 			name:   "custom wallet balance timeout",
 			env:    map[string]string{"WALLET_BALANCE_TIMEOUT": "15s"},
 			adjust: func(want *Config) { want.WalletBalanceTimeout = 15 * time.Second },
+		},
+		{
+			name:   "custom JWT TTL",
+			env:    map[string]string{"JWT_TTL": "15m"},
+			adjust: func(want *Config) { want.JWTTTL = 15 * time.Minute },
+		},
+		{
+			name:   "JWT secret of exactly 32 bytes",
+			env:    map[string]string{"JWT_SECRET": "0123456789abcdef0123456789abcdef"},
+			adjust: func(want *Config) { want.JWTSecret = "0123456789abcdef0123456789abcdef" },
 		},
 	}
 
@@ -128,6 +140,22 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			name: "zero wallet balance timeout",
 			env:  map[string]string{"WALLET_BALANCE_TIMEOUT": "0s"},
 		},
+		{
+			name: "missing JWT secret",
+			env:  map[string]string{"JWT_SECRET": ""},
+		},
+		{
+			name: "JWT secret of 31 bytes",
+			env:  map[string]string{"JWT_SECRET": "0123456789abcdef0123456789abcde"},
+		},
+		{
+			name: "JWT TTL without unit",
+			env:  map[string]string{"JWT_TTL": "60"},
+		},
+		{
+			name: "zero JWT TTL",
+			env:  map[string]string{"JWT_TTL": "0s"},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -139,6 +167,14 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			assertConfigError(t, result, err)
 		})
 	}
+}
+
+func TestLoadConfig_ShortJWTSecret_ErrorDoesNotRevealTheSecret(t *testing.T) {
+	setEnv(t, map[string]string{"JWT_SECRET": "short-secret-value"})
+
+	_, err := LoadConfig()
+
+	assertErrorNotContains(t, err, "short-secret-value")
 }
 
 // expectedDefaultConfig is the config produced when only the required
@@ -153,6 +189,8 @@ func expectedDefaultConfig() Config {
 		WalletAPIKey:           testWalletAPIKey,
 		WalletOperationTimeout: 6 * time.Second,
 		WalletBalanceTimeout:   10 * time.Second,
+		JWTSecret:              testJWTSecret,
+		JWTTTL:                 time.Hour,
 	}
 }
 
@@ -164,12 +202,14 @@ func setEnv(t *testing.T, env map[string]string) {
 	optional := []string{
 		"HTTP_PORT", "LOG_LEVEL", "SHUTDOWN_TIMEOUT",
 		"WALLET_BASE_URL", "WALLET_OPERATION_TIMEOUT", "WALLET_BALANCE_TIMEOUT",
+		"JWT_TTL",
 	}
 	for _, key := range optional {
 		t.Setenv(key, "")
 	}
 	t.Setenv("DATABASE_URL", testDatabaseURL)
 	t.Setenv("WALLET_API_KEY", testWalletAPIKey)
+	t.Setenv("JWT_SECRET", testJWTSecret)
 	for key, value := range env {
 		t.Setenv(key, value)
 	}
@@ -189,5 +229,15 @@ func assertConfigError(t *testing.T, got Config, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("expected an error, got config %+v", got)
+	}
+}
+
+func assertErrorNotContains(t *testing.T, err error, text string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if strings.Contains(err.Error(), text) {
+		t.Errorf("expected error not to contain %q, got %q", text, err)
 	}
 }

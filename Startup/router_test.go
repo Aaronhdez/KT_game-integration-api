@@ -35,20 +35,44 @@ func TestRouter_PostHealth_ReturnsNotFound(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusNotFound)
 }
 
+func TestRouter_PostLogin_ReachesTheLoginHandler(t *testing.T) {
+	recorder := aPOST("/api/v1/auth/login")
+
+	assertStatusCode(t, recorder, loginStubStatus)
+}
+
+func TestRouter_GetLogin_ReturnsNotFound(t *testing.T) {
+	recorder := aGET("/api/v1/auth/login")
+
+	assertStatusCode(t, recorder, http.StatusNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
+// loginStubStatus is an unusual status, so a test can tell that the request
+// reached the login stub and not another route.
+const loginStubStatus = http.StatusTeapot
+
+func stubHandlers() Handlers {
+	return Handlers{
+		Login: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(loginStubStatus)
+		}),
+	}
+}
+
 func aPOST(path string) *httptest.ResponseRecorder {
-	router := NewRouter(slog.New(slog.DiscardHandler))
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, path, nil)
-	router.ServeHTTP(recorder, request)
-	return recorder
+	return serve(http.MethodPost, path)
 }
 
 func aGET(path string) *httptest.ResponseRecorder {
-	router := NewRouter(slog.New(slog.DiscardHandler))
+	return serve(http.MethodGet, path)
+}
+
+func serve(method, path string) *httptest.ResponseRecorder {
+	router := NewRouter(slog.New(slog.DiscardHandler), stubHandlers())
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request := httptest.NewRequest(method, path, nil)
 	router.ServeHTTP(recorder, request)
 	return recorder
 }

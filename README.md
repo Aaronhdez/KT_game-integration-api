@@ -41,18 +41,20 @@ docker run --rm -d --name gameapi-db -p 5432:5432 \
   postgres:16-alpine
 ```
 
-`DATABASE_URL` and `WALLET_API_KEY` are the only required variables; every
-other one has a default:
+`DATABASE_URL`, `WALLET_API_KEY` and `JWT_SECRET` are the only required
+variables; every other one has a default:
 
 ```bash
 export DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"
 export WALLET_API_KEY="<the key in .env.example>"
+export JWT_SECRET="any-local-secret-of-at-least-32-bytes"
 go run ./Startup
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
 
-In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`
-and `$env:WALLET_API_KEY="<the key in .env.example>"`, then `go run ./Startup`.
+In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`,
+`$env:WALLET_API_KEY="<the key in .env.example>"` and
+`$env:JWT_SECRET="any-local-secret-of-at-least-32-bytes"`, then `go run ./Startup`.
 To reach a Wallet started on your machine also set
 `WALLET_BASE_URL=http://localhost:8000` (the default is the Docker Compose host name). If the database cannot be reached within 10 seconds the
 service exits with code 1. Stop the container with `docker stop gameapi-db`
@@ -113,8 +115,8 @@ An invalid value stops the service at startup with an error naming the variable.
 | `WALLET_API_KEY` | Wallet `x-api-key` header (**required**; the mock's key is in `.env.example`) | — | Phase 05 |
 | `WALLET_OPERATION_TIMEOUT` | Timeout per withdraw/deposit call to the Wallet | `6s` | Phase 05 |
 | `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` | Phase 05 |
-| `JWT_SECRET` | HMAC secret to sign JWTs | — | Phase 06 |
-| `JWT_TTL` | Token lifetime | `1h` | Phase 06 |
+| `JWT_SECRET` | HMAC-SHA256 key that signs the JWTs (**required**, at least 32 bytes) | — | Phase 06 |
+| `JWT_TTL` | Token lifetime (Go duration) | `1h` | Phase 06 |
 
 Variables of later phases are listed in advance; the service ignores them until
 the phase that reads them is implemented.
@@ -144,7 +146,40 @@ Base path `/api/v1`. All endpoints except login require `Authorization: Bearer <
 | POST | `/deposit` | Settle a bet (pay the outcome) |
 | POST | `/cancel` | Revert a withdraw or deposit |
 
-*Examples with `curl` and OpenAPI spec: TBD (Phase 13).*
+Errors always have the body `{"code": "...", "message": "..."}`:
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | Malformed JSON, missing or invalid fields (the message says which) |
+| 401 | `UNAUTHORIZED` | Wrong credentials, or missing / invalid / expired token (same message for all) |
+| 404 | `NOT_FOUND` | Unknown route or method, or a resource that does not exist or belongs to another player |
+| 409 | `CONFLICT` | Idempotency conflict or invalid state (the message says which) |
+| 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the withdraw |
+| 502 | `WALLET_ERROR` | The Wallet failed or rejected the call |
+| 504 | `WALLET_TIMEOUT` | The Wallet did not answer in time |
+| 500 | `INTERNAL_ERROR` | Unexpected failure (e.g. database down). Not in the assessment; details only in the logs |
+
+### Login
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username":"player_usd","password":"usd-pass-2026"}'
+```
+
+`200` with `Cache-Control: no-store`:
+
+```json
+{"token":"eyJhbGciOiJIUzI1NiIs…","expiresAt":"2026-11-07T22:57:53Z"}
+```
+
+The token is an HS256 JWT whose `sub` is the player's wallet user ID; it
+expires after `JWT_TTL`. Send it as `Authorization: Bearer <token>` to the
+other endpoints. An unknown username and a wrong password get the same `401`.
+In PowerShell use `curl.exe` and escape the inner quotes
+(`-d '{\"username\":\"player_usd\",\"password\":\"usd-pass-2026\"}'`).
+
+*More `curl` examples and OpenAPI spec: Phase 13.*
 
 ## Resetting the state
 

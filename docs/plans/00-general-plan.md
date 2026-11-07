@@ -85,7 +85,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | 03 | `03-domain.md` | `Domain/`: `Money`, `Currency`, IDs, `Transaction`, `Bet`, statuses and state transitions, domain errors, Cancel decision rules, **ports** (`PlayerRepository`, `WalletClient`, `Clock`, `IDGenerator`, `PasswordHasher`, `TokenIssuer`). Unit tests. *(Bet/transaction repositories and locking moved to Phase 04.)* | 02 |
 | 04 | `04-persistence.md` | PostgreSQL schema + migrations, seed of the 4 players (bcrypt hashes), repositories in `Persistence/`, unit-of-work / tx helper, locking primitive. Integration tests. *(Built with pgx + goose; integration tests use a local PostgreSQL via `TEST_DATABASE_URL`, no testcontainers; in-memory fakes deferred to their first consumer, Phases 06/08.)* | 03 |
 | 05 | `05-wallet-client.md` | HTTP Wallet client in `Shared/wallet`: timeouts, `x-api-key`, error mapping to *applied / not applied / unknown*, logging. Fake wallet in `Domain/domaintest` for tests. *(Two timeouts replace `WALLET_TIMEOUT`; balance reads retried once; no automated tests against the real Wallet; the client is wired into `Startup` in Phase 07.)* | 01, 03 |
-| 06 | `06-authentication.md` | `POST /api/v1/auth/login`, JWT issue/verify, auth middleware, identical error for unknown user / wrong password. | 04 |
+| 06 | `06-authentication.md` | `POST /api/v1/auth/login`, JWT issue/verify, auth middleware, identical error for unknown user / wrong password. *(Also: the domain error → HTTP mapping with an extra `500 INTERNAL_ERROR`, the shared JSON body decoder, `Shared/clock`, auth fakes in `domaintest`; naming `XxxController` / `XxxCommandHandler` / `XxxQueryHandler`; the middleware is first attached to a route in Phase 07.)* | 04 |
 | 07 | `07-player-endpoint.md` | `GET /api/v1/player` (Query): live balance from Wallet, 502/504 on failure, never cached. | 05, 06 |
 | 08 | `08-withdraw-endpoint.md` | `POST /api/v1/withdraw` (Action): validation, idempotency, intent-first, betId generation, outcomes 201/200/202/400/409/422/502. | 05, 06 |
 | 09 | `09-deposit-endpoint.md` | `POST /api/v1/deposit`: link to withdraw, WON/LOST, single active settlement, zero-amount decision. | 08 |
@@ -180,6 +180,15 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 5. ~~Usernames/passwords for the 4 seeded players (Phase 04).~~ **Resolved in
    Phase 04:** `player_usd`, `player_eur`, `player_kes`, `player_usd_2`, each
    with its own password, documented in `README.md`.
+6. Where do errors live? Today every business error is in `Domain/errors.go`.
+   Alternative raised in Phase 06: *each error is declared in the lowest layer
+   that produces it* (e.g. `ErrMissingCredentials`, `ErrIdempotencyConflict`
+   in `Actions/errors.go`), always wrapping one of the seven `Domain`
+   categories, so the HTTP mapping does not change. Errors that are part of a
+   port's contract (`ErrInvalidCredentials`, `ErrInvalidToken`, the §8.5 cancel
+   errors) stay in `Domain` either way. Rejected: a 1:1 copy of every domain
+   error in `Actions`. **Revisit once Withdraw, Deposit and Cancel exist
+   (after Phase 10).**
 
 ## 8. Prerequisites on the developer machine
 
