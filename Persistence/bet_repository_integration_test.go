@@ -163,52 +163,6 @@ func TestBetRepository_Update_AnotherPlayersBet_LeavesTheBetUnchanged(t *testing
 
 /////////////////////////////////////////////////////////////////////////////////////
 
-// settleBet settles the bet in memory, one second after its creation, as a
-// use case would before calling Update.
-func settleBet(t *testing.T, bet *domain.Bet, amount string) {
-	t.Helper()
-	if err := bet.Settle(parseMoney(t, amount), bet.CreatedAt.Add(time.Second)); err != nil {
-		t.Fatalf("settle bet %d: %v", bet.ID, err)
-	}
-}
-
-func parseMoney(t *testing.T, value string) domain.Money {
-	t.Helper()
-	amount, err := domain.ParseMoney(value)
-	if err != nil {
-		t.Fatalf("parse money %q: %v", value, err)
-	}
-	return amount
-}
-
-// reserveBetID calls the repository's NextID as setup, failing the test on error.
-func reserveBetID(t *testing.T, repository *betRepository) domain.BetID {
-	t.Helper()
-	id, err := repository.NextID(testContext(t))
-	if err != nil {
-		t.Fatalf("reserve bet id: %v", err)
-	}
-	return id
-}
-
-// assertBetIDGreaterThan checks only the order, not "+1": a sequence can skip
-// numbers (nextval is never rolled back) and other tests consume IDs too.
-func assertBetIDGreaterThan(t *testing.T, result domain.BetID, err error, previous domain.BetID) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result <= previous {
-		t.Errorf("expected a bet id greater than %d, got %d", previous, result)
-	}
-}
-
-// testNow is "now" at the precision PostgreSQL stores (microseconds), so a
-// time written and read back compares equal.
-func testNow() time.Time {
-	return time.Now().UTC().Truncate(time.Microsecond)
-}
-
 // newTestBet builds a PLACED bet with a fresh ID from bet_id_seq, so tests
 // never collide with each other's bets.
 func newTestBet(t *testing.T, pool *pgxpool.Pool, userID domain.UserID, stake string) domain.Bet {
@@ -224,6 +178,12 @@ func newTestBet(t *testing.T, pool *pgxpool.Pool, userID domain.UserID, stake st
 	return domain.NewPlacedBet(domain.BetID(id), userID, domain.EUR, amount, testNow())
 }
 
+// testNow is "now" at the precision PostgreSQL stores (microseconds), so a
+// time written and read back compares equal.
+func testNow() time.Time {
+	return time.Now().UTC().Truncate(time.Microsecond)
+}
+
 // insertBetRow writes a bet with plain SQL, independently of the repository under test.
 func insertBetRow(t *testing.T, pool *pgxpool.Pool, bet domain.Bet) {
 	t.Helper()
@@ -232,6 +192,38 @@ func insertBetRow(t *testing.T, pool *pgxpool.Pool, bet domain.Bet) {
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		int64(bet.ID), int64(bet.UserID), string(bet.Currency), bet.Stake.String(),
 		string(bet.Status), bet.CreatedAt, bet.UpdatedAt)
+}
+
+// assertBet compares field by field: Money and time.Time need Equal, not ==
+func assertBet(t *testing.T, result domain.Bet, err error, expected domain.Bet) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ID != expected.ID || result.UserID != expected.UserID ||
+		result.Currency != expected.Currency || result.Status != expected.Status {
+		t.Errorf("expected bet %d/%d/%s/%s, got %d/%d/%s/%s",
+			expected.ID, expected.UserID, expected.Currency, expected.Status,
+			result.ID, result.UserID, result.Currency, result.Status)
+	}
+	if !result.Stake.Equal(expected.Stake) {
+		t.Errorf("expected stake %s, got %s", expected.Stake, result.Stake)
+	}
+	if !result.CreatedAt.Equal(expected.CreatedAt) || !result.UpdatedAt.Equal(expected.UpdatedAt) {
+		t.Errorf("expected times %v/%v, got %v/%v",
+			expected.CreatedAt, expected.UpdatedAt, result.CreatedAt, result.UpdatedAt)
+	}
+}
+
+// assertStoredBet checks that the write succeeded and that the row in the
+// database, read with plain SQL, equals expected.
+func assertStoredBet(t *testing.T, pool *pgxpool.Pool, err error, expected domain.Bet) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := readBetRow(t, pool, expected.ID)
+	assertBet(t, result, nil, expected)
 }
 
 // readBetRow reads a bet with plain SQL, independently of the repository under test.
@@ -267,17 +259,6 @@ func readBetRow(t *testing.T, pool *pgxpool.Pool, id domain.BetID) domain.Bet {
 	}
 }
 
-// assertStoredBet checks that the write succeeded and that the row in the
-// database, read with plain SQL, equals expected.
-func assertStoredBet(t *testing.T, pool *pgxpool.Pool, err error, expected domain.Bet) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	result := readBetRow(t, pool, expected.ID)
-	assertBet(t, result, nil, expected)
-}
-
 func assertError(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
@@ -285,23 +266,42 @@ func assertError(t *testing.T, err error) {
 	}
 }
 
-// assertBet compares field by field: Money and time.Time need Equal, not ==
-func assertBet(t *testing.T, result domain.Bet, err error, expected domain.Bet) {
+// reserveBetID calls the repository's NextID as setup, failing the test on error.
+func reserveBetID(t *testing.T, repository *betRepository) domain.BetID {
+	t.Helper()
+	id, err := repository.NextID(testContext(t))
+	if err != nil {
+		t.Fatalf("reserve bet id: %v", err)
+	}
+	return id
+}
+
+// assertBetIDGreaterThan checks only the order, not "+1": a sequence can skip
+// numbers (nextval is never rolled back) and other tests consume IDs too.
+func assertBetIDGreaterThan(t *testing.T, result domain.BetID, err error, previous domain.BetID) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.ID != expected.ID || result.UserID != expected.UserID ||
-		result.Currency != expected.Currency || result.Status != expected.Status {
-		t.Errorf("expected bet %d/%d/%s/%s, got %d/%d/%s/%s",
-			expected.ID, expected.UserID, expected.Currency, expected.Status,
-			result.ID, result.UserID, result.Currency, result.Status)
+	if result <= previous {
+		t.Errorf("expected a bet id greater than %d, got %d", previous, result)
 	}
-	if !result.Stake.Equal(expected.Stake) {
-		t.Errorf("expected stake %s, got %s", expected.Stake, result.Stake)
+}
+
+// settleBet settles the bet in memory, one second after its creation, as a
+// use case would before calling Update.
+func settleBet(t *testing.T, bet *domain.Bet, amount string) {
+	t.Helper()
+	if err := bet.Settle(parseMoney(t, amount), bet.CreatedAt.Add(time.Second)); err != nil {
+		t.Fatalf("settle bet %d: %v", bet.ID, err)
 	}
-	if !result.CreatedAt.Equal(expected.CreatedAt) || !result.UpdatedAt.Equal(expected.UpdatedAt) {
-		t.Errorf("expected times %v/%v, got %v/%v",
-			expected.CreatedAt, expected.UpdatedAt, result.CreatedAt, result.UpdatedAt)
+}
+
+func parseMoney(t *testing.T, value string) domain.Money {
+	t.Helper()
+	amount, err := domain.ParseMoney(value)
+	if err != nil {
+		t.Fatalf("parse money %q: %v", value, err)
 	}
+	return amount
 }
