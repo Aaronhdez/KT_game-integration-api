@@ -18,12 +18,38 @@ const (
 )
 
 func TestWithdraw_Success_ReturnsTheNewBalance(t *testing.T) {
-	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"4989.5","transactions":[{"id":1,"reference":"tx-1"}]}`)
-	client := newTestClient(server)
+	testCases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "balance as a string, as the mock sends it",
+			body: `{"balance":"4989.5","transactions":[{"id":1,"reference":"tx-1"}]}`,
+			want: "4989.50",
+		},
+		{
+			name: "balance as a number, as swagger documents it",
+			body: `{"balance":4989.5,"transactions":[{"id":1,"reference":"tx-1"}]}`,
+			want: "4989.50",
+		},
+		{
+			name: "large balance with cents",
+			body: `{"balance":"9000000000.09","transactions":[{"id":1,"reference":"tx-1"}]}`,
+			want: "9000000000.09",
+		},
+	}
 
-	result, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, testCase.body)
+			client := newTestClient(server)
 
-	assertBalance(t, result, err, "4989.50")
+			result, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertBalance(t, result, err, testCase.want)
+		})
+	}
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
