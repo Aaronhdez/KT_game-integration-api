@@ -32,7 +32,8 @@ func TestLoginController_ValidCredentials_Returns200(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusOK)
 }
 
-func TestLoginController_ValidCredentials_ReturnsTokenAndExpiresAt(t *testing.T) {
+// §8.1: { "token": "<JWT>", "tokenType": "Bearer", "expiresAt": "..." }
+func TestLoginController_ValidCredentials_ReturnsTokenTokenTypeAndExpiresAt(t *testing.T) {
 	fixture := givenALoginController()
 
 	recorder := fixture.post(credentialsBody(testUsername, testPassword))
@@ -40,6 +41,7 @@ func TestLoginController_ValidCredentials_ReturnsTokenAndExpiresAt(t *testing.T)
 	result := decodeLoginResponse(t, recorder)
 	assertLoginResponse(t, result, map[string]string{
 		"token":     "token-for-34633089486",
+		"tokenType": "Bearer",
 		"expiresAt": "2026-11-07T13:00:00Z", // RFC 3339, UTC: testNow + FakeTokenTTL
 	})
 }

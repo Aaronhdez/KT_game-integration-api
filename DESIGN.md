@@ -113,7 +113,7 @@ is wired into `Startup` with its first consumer, `GET /player` (Phase 07).
 
 **Authentication (Phase 06).** Login checks the password against the seeded
 bcrypt hash and returns an HS256 JWT (`sub` = wallet user ID as a string, `iat`,
-`exp`) plus `expiresAt`, with `Cache-Control: no-store`. An unknown username and
+`exp`) plus `tokenType: "Bearer"` and `expiresAt` (§8.1), with `Cache-Control: no-store`. An unknown username and
 a wrong password return the **same `401`**, and an unknown username still runs
 bcrypt against a fixed dummy hash, so neither the body nor the response time
 reveals which usernames exist (measured: ≈ 55 ms both). Empty fields are a

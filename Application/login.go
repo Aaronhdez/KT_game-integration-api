@@ -14,9 +14,14 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-// loginResponse represents the structure of the response returned after a successful login.
+// tokenTypeBearer tells the client how to send the token back:
+// "Authorization: Bearer <token>".
+const tokenTypeBearer = "Bearer"
+
+// loginResponse represents the structure of the response returned after a successful login (§8.1).
 type loginResponse struct {
 	Token     string `json:"token"`
+	TokenType string `json:"tokenType"`
 	ExpiresAt string `json:"expiresAt"`
 }
 
@@ -50,5 +55,9 @@ func (c *LoginController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, loginResponse{Token: result.Token, ExpiresAt: result.ExpiresAt.UTC().Format(time.RFC3339)})
+	writeJSON(w, http.StatusOK, loginResponse{
+		Token:     result.Token,
+		TokenType: tokenTypeBearer,
+		ExpiresAt: result.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 }

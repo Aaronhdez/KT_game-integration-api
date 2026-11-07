@@ -170,7 +170,7 @@ curl -i -X POST http://localhost:8080/api/v1/auth/login \
 `200` with `Cache-Control: no-store`:
 
 ```json
-{"token":"eyJhbGciOiJIUzI1NiIs…","expiresAt":"2026-11-07T22:57:53Z"}
+{"token":"eyJhbGciOiJIUzI1NiIs…","tokenType":"Bearer","expiresAt":"2026-11-07T22:57:53Z"}
 ```
 
 The token is an HS256 JWT whose `sub` is the player's wallet user ID; it

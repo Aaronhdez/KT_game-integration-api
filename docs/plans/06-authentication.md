@@ -287,6 +287,8 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
    `400`/`409`, a fixed text per category otherwise; unexpected errors →
    `500 INTERNAL_ERROR` (documented in `DESIGN.md` and `README.md`).
 4. ~~**Exact login response fields.**~~ **Resolved:** `{"token", "expiresAt"}`
+   *(Corrected after the phase: §8.1 also has `"tokenType": "Bearer"`, which
+   was missed — added in `fix(auth): add tokenType to login response`.)*
    as recorded in Phase 03 from §8.1.
 
 ## As built — deviations from this plan
