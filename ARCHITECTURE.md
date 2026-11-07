@@ -149,10 +149,9 @@ implements the same port in memory for use-case tests.
 
 | File | Content |
 |---|---|
-| `config.go` | `Config{BaseURL, APIKey, OperationTimeout, BalanceTimeout}` |
+| `client.go` | `Config{BaseURL, APIKey, OperationTimeout, BalanceTimeout}`, then `Withdraw`, `Deposit`, `Balance` and their helpers in call order; one log line per call |
 | `dto.go` | Wallet JSON shapes (unexported); amounts and balances as `json.Number`, never `float64` |
 | `classify.go` | `classifyOperation(status, code)`: the applied / not applied / unknown table; `isSuccess` |
-| `client.go` | `Withdraw`, `Deposit`, `Balance`, then their helpers in call order; one log line per call |
 
 Withdraw / Deposit result → domain outcome:
 

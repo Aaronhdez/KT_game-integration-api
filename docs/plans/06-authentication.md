@@ -311,10 +311,11 @@ both already chosen in the master plan.
 
 ## Follow-ups after this phase
 
-To do once step 12 is committed, as one commit
+**Done** after step 12, in one commit
 `refactor: merge single-use files into their package's main file`
-(no behaviour change; criterion: one file per concept someone would look up by
-name, small pieces with no life of their own go in their package's main file):
+(no behaviour change — unit and integration tests green; criterion: one file
+per concept someone would look up by name, small pieces with no life of their
+own go in their package's main file):
 
 - `Shared/wallet/config.go` → top of `Shared/wallet/client.go`.
 - `Startup/logger.go` → `Startup/main.go` (its test → `Startup/main_test.go`).
