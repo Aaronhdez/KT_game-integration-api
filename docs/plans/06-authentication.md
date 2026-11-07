@@ -59,6 +59,17 @@ attached to a route in Phase 07 (`GET /api/v1/player`).
 | Handler tests use the **real `actions.Login`** with the fakes | `Application` may import `Actions`; no extra interface just for tests, and the tests exercise the real rule end to end at HTTP level. | An `Application`-side interface for the use case. |
 | `NewRouter(logger, handlers Handlers)` where `Handlers` (in `Startup`) holds the HTTP handlers, starting with `Login http.Handler` | The router signature stays stable as Phases 07–10 add fields; router tests pass simple stub handlers. | A growing positional parameter list. |
 
+### Naming (decided during implementation)
+
+| Layer | Convention | This phase |
+|---|---|---|
+| `Application` | one `XxxController` per endpoint, implementing `http.Handler` (`ServeHTTP`) | `LoginController` (replaces `LoginHandler`) |
+| `Actions` | `XxxCommandHandler` + `XxxCommand` / `XxxResult` | `LoginCommandHandler` (replaces `Login`) |
+| `Queries` | `XxxQueryHandler` | — (`GetPlayerQueryHandler` in Phase 07) |
+
+"Handler" is kept for use cases (MediatR analogy) and "Controller" for HTTP, so
+the two never share a name.
+
 ### Login flow
 
 ```

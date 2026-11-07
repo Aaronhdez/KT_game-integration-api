@@ -180,6 +180,15 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 5. ~~Usernames/passwords for the 4 seeded players (Phase 04).~~ **Resolved in
    Phase 04:** `player_usd`, `player_eur`, `player_kes`, `player_usd_2`, each
    with its own password, documented in `README.md`.
+6. Where do errors live? Today every business error is in `Domain/errors.go`.
+   Alternative raised in Phase 06: *each error is declared in the lowest layer
+   that produces it* (e.g. `ErrMissingCredentials`, `ErrIdempotencyConflict`
+   in `Actions/errors.go`), always wrapping one of the seven `Domain`
+   categories, so the HTTP mapping does not change. Errors that are part of a
+   port's contract (`ErrInvalidCredentials`, `ErrInvalidToken`, the §8.5 cancel
+   errors) stay in `Domain` either way. Rejected: a 1:1 copy of every domain
+   error in `Actions`. **Revisit once Withdraw, Deposit and Cancel exist
+   (after Phase 10).**
 
 ## 8. Prerequisites on the developer machine
 
