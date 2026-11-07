@@ -58,11 +58,29 @@ func (r *transactionRepository) FindByID(ctx context.Context, userID domain.User
 	query := "SELECT " + transactionColumns + " FROM transactions WHERE id = $1 AND wallet_user_id = $2"
 
 	tx, err := scanTransaction(r.db.QueryRow(ctx, query, string(id), int64(userID)))
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Transaction{}, domain.ErrTransactionNotFound
 	}
 	if err != nil {
 		return domain.Transaction{}, fmt.Errorf("find transaction: %w", err)
+	}
+	return tx, nil
+}
+
+func (r *transactionRepository) FindByProviderTransactionID(ctx context.Context, userID domain.UserID, providerTransactionID domain.ProviderTransactionID) (domain.Transaction, error) {
+	query := "SELECT " + transactionColumns + ` FROM transactions
+		WHERE provider_transaction_id = $1
+		AND wallet_user_id = $2
+		AND type IN ('WITHDRAW', 'DEPOSIT')`
+
+	tx, err := scanTransaction(r.db.QueryRow(ctx, query, string(providerTransactionID), int64(userID)))
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Transaction{}, domain.ErrTransactionNotFound
+	}
+	if err != nil {
+		return domain.Transaction{}, fmt.Errorf("find transaction by provider transaction id: %w", err)
 	}
 	return tx, nil
 }

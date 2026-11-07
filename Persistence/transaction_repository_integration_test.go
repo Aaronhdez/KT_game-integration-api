@@ -159,6 +159,60 @@ func TestTransactionRepository_FindByID_UnknownID_ReturnsTransactionNotFound(t *
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
+func TestTransactionRepository_FindByProviderTransactionID_Withdraw_ReturnsIt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+
+	result, err := repository.FindByProviderTransactionID(testContext(t), eurPlayerID, withdraw.ProviderTransactionID)
+
+	assertTransaction(t, result, err, withdraw)
+}
+
+func TestTransactionRepository_FindByProviderTransactionID_Deposit_ReturnsIt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	deposit := newTestDeposit(t, pool, newTestWithdraw(t, pool, eurPlayerID))
+	insertTransactionRow(t, pool, deposit)
+
+	result, err := repository.FindByProviderTransactionID(testContext(t), eurPlayerID, deposit.ProviderTransactionID)
+
+	assertTransaction(t, result, err, deposit)
+}
+
+func TestTransactionRepository_FindByProviderTransactionID_TransactionWithItsCancel_ReturnsTheOriginal(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	insertTransactionRow(t, pool, newTestCancel(t, pool, withdraw))
+
+	result, err := repository.FindByProviderTransactionID(testContext(t), eurPlayerID, withdraw.ProviderTransactionID)
+
+	assertTransaction(t, result, err, withdraw)
+}
+
+func TestTransactionRepository_FindByProviderTransactionID_AnotherPlayersTransaction_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+
+	_, err := repository.FindByProviderTransactionID(testContext(t), usdPlayerID, withdraw.ProviderTransactionID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_FindByProviderTransactionID_UnknownID_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+
+	_, err := repository.FindByProviderTransactionID(testContext(t), eurPlayerID, "never-sent")
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // newTestWithdraw builds a PENDING withdraw of 10.50 EUR on a fresh bet ID.
