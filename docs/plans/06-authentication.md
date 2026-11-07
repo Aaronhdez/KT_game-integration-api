@@ -267,20 +267,16 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
 
 ## Open questions
 
-1. **Who writes which step?** Proposal: developer writes the production code of
-   4, 5, 7, 8, 9, 10; Claude writes the domain additions, config, fakes, wiring,
-   all tests and docs.
-2. **Dummy-hash timing protection: keep it?** Recommended (one call, defensible
-   in the interview). The cost: the dummy hash is a bcrypt-specific constant
-   living in `Actions` as an opaque string.
-3. **Error messages:** fixed text per category for everything (simplest, zero
-   leak risk), or the domain sentinel's text for `400`/`409` (more helpful to
-   providers: "currency does not match")? Recommended: sentinel text for
-   `400`/`409`, fixed text otherwise. Also confirm the extra
-   `500 INTERNAL_ERROR` code.
-4. **Exact login response fields:** this plan assumes `{"token", "expiresAt"}`
-   from §8.1 as recorded in Phase 03. Please check the assessment PDF for the
-   exact names (e.g. `accessToken`, `tokenType`, `expiresIn`) before step 9.
+1. ~~**Who writes which step?**~~ **Resolved:** as proposed — developer writes
+   the production code of 4, 5, 7, 8, 9, 10; Claude writes the domain
+   additions, config, fakes, wiring, all tests and docs.
+2. ~~**Dummy-hash timing protection: keep it?**~~ **Resolved:** kept. The dummy
+   hash is a bcrypt-specific constant living in `Actions` as an opaque string.
+3. ~~**Error messages.**~~ **Resolved:** the domain sentinel's text for
+   `400`/`409`, a fixed text per category otherwise; unexpected errors →
+   `500 INTERNAL_ERROR` (documented in `DESIGN.md` and `README.md`).
+4. ~~**Exact login response fields.**~~ **Resolved:** `{"token", "expiresAt"}`
+   as recorded in Phase 03 from §8.1.
 
 ## Definition of done
 
