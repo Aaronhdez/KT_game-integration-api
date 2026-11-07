@@ -12,3 +12,12 @@ type Clock interface {
 type IDGenerator interface {
 	NewTransactionID() TransactionID
 }
+
+// PasswordHasher checks a password against the stored hash.
+// Verify returns nil if they match and ErrInvalidCredentials if they do not;
+// any other error means the hash itself is unusable. Hashes for the seeded
+// players are produced once, when the seed is written, so the login
+// use case only needs to verify.
+type PasswordHasher interface {
+	Verify(passwordHash, password string) error
+}
