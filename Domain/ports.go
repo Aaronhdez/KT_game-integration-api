@@ -38,12 +38,37 @@ type TokenIssuer interface {
 	Issue(userID UserID, now time.Time) (IssuedToken, error)
 }
 
-// PlayerRepository reads the seeded player accounts (§8.1). Both methods
+// PlayerRepository reads the seeded player accounts. Both methods
 // return ErrPlayerNotFound when there is no such player.
 //   - FindByUsername is used by login.
 //   - FindByID is used once the player is known from the token, e.g. to check
-//     that a withdraw's currency matches the player's wallet (§8.3).
+//     that a withdraw's currency matches the player's wallet.
 type PlayerRepository interface {
 	FindByUsername(ctx context.Context, username string) (Player, error)
 	FindByID(ctx context.Context, userID UserID) (Player, error)
+}
+
+// WalletOperation is one money movement sent to the Wallet. Our API processes
+// a single transaction per request, so each call carries exactly one.
+type WalletOperation struct {
+	UserID    UserID
+	Currency  Currency
+	Amount    Money
+	BetID     BetID
+	Reference TransactionID
+}
+
+// WalletBalance is a player's balance as read from the Wallet, which is the
+// source of truth for balances.
+type WalletBalance struct {
+	Amount   Money
+	Currency Currency
+}
+
+// WalletClient is the Wallet service.
+// Every call is bounded by a timeout.
+type WalletClient interface {
+	Balance(ctx context.Context, userID UserID) (WalletBalance, error)
+	Withdraw(ctx context.Context, operation WalletOperation) (Money, error)
+	Deposit(ctx context.Context, operation WalletOperation) (Money, error)
 }
