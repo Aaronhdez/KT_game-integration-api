@@ -111,6 +111,35 @@ operation, user, bet, reference, attempt, Wallet status and code, outcome and
 duration; the API key, headers and bodies are never logged (tested). The client
 is wired into `Startup` with its first consumer, `GET /player` (Phase 07).
 
+**Authentication (Phase 06).** Login checks the password against the seeded
+bcrypt hash and returns an HS256 JWT (`sub` = wallet user ID as a string, `iat`,
+`exp`) plus `expiresAt`, with `Cache-Control: no-store`. An unknown username and
+a wrong password return the **same `401`**, and an unknown username still runs
+bcrypt against a fixed dummy hash, so neither the body nor the response time
+reveals which usernames exist (measured: ≈ 55 ms both). Empty fields are a
+`400`, and a database failure is a `500`, never "wrong password". Tokens are
+verified strictly: only HS256 (no `alg: none`), `exp` required, no clock-skew
+leeway, positive numeric subject. `JWT_SECRET` is required and must be at least
+32 bytes (RFC 7518 §3.2); the service refuses to start otherwise. The
+middleware takes the player only from the verified token (never from the body),
+answers every failure with the same `401` plus `WWW-Authenticate: Bearer`, and
+does not look the player up in the database. Passwords, hashes, tokens and the
+secret are never logged.
+
+**Errors → HTTP (Phase 06).** One function in `Application` maps the seven
+domain error categories to status + code with `errors.Is`, so wrapping errors
+with context never changes the status. For `400` and `409` the message is the
+domain error's text (it tells the provider what to fix and never carries
+secrets); every other category has a fixed message. Anything unrecognised is
+`500 INTERNAL_ERROR` — a code the assessment does not define — logged with its
+cause and never shown to the client. Request bodies are limited to 1 MiB, must
+be exactly one JSON object, and unknown fields are ignored.
+
+*Future improvements (authentication):* refresh tokens and revocation (today a
+leaked token is valid until it expires — keep `JWT_TTL` short), rate limiting or
+lockout of repeated failed logins, and key rotation (`kid` header with several
+accepted secrets).
+
 **Missing `amount` in a deposit (to handle in Phase 09).** If the field is absent,
 JSON decoding leaves the amount at zero without calling our decoder — which for a
 deposit would silently mean "bet lost". The deposit request DTO must detect the
