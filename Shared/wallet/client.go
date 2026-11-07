@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
@@ -17,6 +18,7 @@ import (
 const (
 	withdrawPath        = "/api/v1/withdraw"
 	depositPath         = "/api/v1/deposit"
+	balancePath         = "/api/v1/balance/"
 	maxResponseBodySize = 1 << 20
 )
 
@@ -46,6 +48,38 @@ func (client *Client) Withdraw(ctx context.Context, operation domain.WalletOpera
 // domain.WalletClient describes.
 func (client *Client) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
 	return client.operate(ctx, depositPath, "deposit", operation)
+}
+
+// Balance retrieves the wallet balance for the specified user.
+func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
+	endpointURL := client.config.BaseURL + balancePath + strconv.FormatInt(int64(userID), 10)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
+	if err != nil {
+		return domain.WalletBalance{}, fmt.Errorf("build wallet balance request: %v: %w", err, domain.ErrWalletFailure)
+	}
+	request.Header.Set("x-api-key", client.config.APIKey)
+
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return domain.WalletBalance{}, fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure)
+	}
+	defer response.Body.Close()
+
+	var walletResponse balanceResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBodySize)).Decode(&walletResponse); err != nil {
+		return domain.WalletBalance{}, fmt.Errorf("decode wallet balance response: %v: %w", err, domain.ErrWalletFailure)
+	}
+
+	amount, err := domain.ParseMoney(walletResponse.Balance.String())
+	if err != nil {
+		return domain.WalletBalance{}, fmt.Errorf("parse wallet balance amount: %v: %w", err, domain.ErrWalletFailure)
+	}
+	currency, err := domain.ParseCurrency(walletResponse.Currency)
+	if err != nil {
+		return domain.WalletBalance{}, fmt.Errorf("parse wallet balance currency: %v: %w", err, domain.ErrWalletFailure)
+	}
+
+	return domain.WalletBalance{Amount: amount, Currency: currency}, nil
 }
 
 func (client *Client) operate(ctx context.Context, path string, name string, operation domain.WalletOperation) (domain.Money, error) {

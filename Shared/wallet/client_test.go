@@ -415,6 +415,15 @@ func TestDeposit_LogsTheOperationName(t *testing.T) {
 	assertLogField(t, logs, "operation", "deposit")
 }
 
+func TestBalance_Success_ReturnsTheBalanceAndCurrency(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"5000","currency":"USD"}`)
+	client := newTestClient(server)
+
+	result, err := client.Balance(context.Background(), 34633089486)
+
+	assertWalletBalance(t, result, err, "5000.00", domain.USD)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // givenAWalletDroppingConnections starts a fake Wallet that closes every
@@ -572,6 +581,16 @@ func assertRequestCount(t *testing.T, requests *atomic.Int32, want int32) {
 	t.Helper()
 	if result := requests.Load(); result != want {
 		t.Errorf("expected %d request(s) to the Wallet, got %d", want, result)
+	}
+}
+
+// assertWalletBalance checks that the balance read succeeded with the expected
+// amount and currency.
+func assertWalletBalance(t *testing.T, result domain.WalletBalance, err error, amount string, currency domain.Currency) {
+	t.Helper()
+	assertNoError(t, err)
+	if !result.Amount.Equal(givenAParsedMoney(t, amount)) || result.Currency != currency {
+		t.Errorf("expected balance %s %s, got %s %s", amount, currency, result.Amount, result.Currency)
 	}
 }
 

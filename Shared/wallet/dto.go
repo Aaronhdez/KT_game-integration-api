@@ -30,3 +30,8 @@ type errorResponse struct {
 	Code string `json:"code"`
 	Msg  string `json:"msg"`
 }
+
+type balanceResponse struct {
+	Balance  json.Number `json:"balance"`
+	Currency string      `json:"currency"`
+}
