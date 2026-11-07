@@ -213,6 +213,55 @@ func TestTransactionRepository_FindByProviderTransactionID_UnknownID_ReturnsTran
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
+func TestTransactionRepository_FindCancelOf_CancelledWithdraw_ReturnsItsCancel(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	cancel := newTestCancel(t, pool, withdraw)
+	insertTransactionRow(t, pool, cancel)
+
+	result, err := repository.FindCancelOf(testContext(t), eurPlayerID, withdraw.ID)
+
+	assertTransaction(t, result, err, cancel)
+}
+
+func TestTransactionRepository_FindCancelOf_CancelledDeposit_ReturnsItsCancel(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	deposit := newTestDeposit(t, pool, newTestWithdraw(t, pool, eurPlayerID))
+	insertTransactionRow(t, pool, deposit)
+	cancel := newTestCancel(t, pool, deposit)
+	insertTransactionRow(t, pool, cancel)
+
+	result, err := repository.FindCancelOf(testContext(t), eurPlayerID, deposit.ID)
+
+	assertTransaction(t, result, err, cancel)
+}
+
+func TestTransactionRepository_FindCancelOf_TransactionWithoutCancel_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+
+	_, err := repository.FindCancelOf(testContext(t), eurPlayerID, withdraw.ID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_FindCancelOf_AnotherPlayersCancel_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	insertTransactionRow(t, pool, newTestCancel(t, pool, withdraw))
+
+	_, err := repository.FindCancelOf(testContext(t), usdPlayerID, withdraw.ID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // newTestWithdraw builds a PENDING withdraw of 10.50 EUR on a fresh bet ID.

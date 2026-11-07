@@ -85,6 +85,23 @@ func (r *transactionRepository) FindByProviderTransactionID(ctx context.Context,
 	return tx, nil
 }
 
+func (r *transactionRepository) FindCancelOf(ctx context.Context, userID domain.UserID, id domain.TransactionID) (domain.Transaction, error) {
+	query := "SELECT " + transactionColumns + ` FROM transactions
+		WHERE wallet_user_id = $1
+		AND cancelled_transaction_id = $2
+		AND type = 'CANCEL'`
+
+	tx, err := scanTransaction(r.db.QueryRow(ctx, query, int64(userID), string(id)))
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Transaction{}, domain.ErrTransactionNotFound
+	}
+	if err != nil {
+		return domain.Transaction{}, fmt.Errorf("find cancel of transaction: %w", err)
+	}
+	return tx, nil
+}
+
 func scanTransaction(row pgx.Row) (domain.Transaction, error) {
 	var (
 		id                     string
