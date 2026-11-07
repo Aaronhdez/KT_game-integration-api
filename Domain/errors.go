@@ -25,6 +25,7 @@ var (
 	ErrInvalidProviderTransactionID = fmt.Errorf("%w: invalid provider transaction id", ErrInvalidInput)
 	ErrInvalidCredentials           = fmt.Errorf("%w: invalid credentials", ErrUnauthorized)
 	ErrTransactionNotFound          = fmt.Errorf("%w: transaction not found", ErrNotFound)
+	ErrPlayerNotFound               = fmt.Errorf("%w: player not found", ErrNotFound)
 	ErrIdempotencyConflict          = fmt.Errorf("%w: same provider transaction id with a different payload", ErrConflict)
 	ErrBetAlreadySettled            = fmt.Errorf("%w: bet already settled", ErrConflict)
 	ErrBetNotSettled                = fmt.Errorf("%w: bet is not settled", ErrConflict)

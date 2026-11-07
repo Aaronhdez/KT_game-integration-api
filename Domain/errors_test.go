@@ -20,6 +20,7 @@ func TestSpecificErrors_AreRecognisedAsTheirCategory(t *testing.T) {
 		{name: "invalid provider transaction id", err: ErrInvalidProviderTransactionID, category: ErrInvalidInput},
 		{name: "invalid credentials", err: ErrInvalidCredentials, category: ErrUnauthorized},
 		{name: "transaction not found", err: ErrTransactionNotFound, category: ErrNotFound},
+		{name: "player not found", err: ErrPlayerNotFound, category: ErrNotFound},
 		{name: "idempotency conflict", err: ErrIdempotencyConflict, category: ErrConflict},
 		{name: "bet already settled", err: ErrBetAlreadySettled, category: ErrConflict},
 		{name: "bet not settled", err: ErrBetNotSettled, category: ErrConflict},
