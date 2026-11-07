@@ -36,8 +36,15 @@ CREATE TABLE transactions (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE UNIQUE INDEX transactions_idempotency_key ON transactions (wallet_user_id, provider_transaction_id) WHERE type IN ('WITHDRAW', 'DEPOSIT');
+CREATE UNIQUE INDEX transactions_active_settlement ON transactions (bet_id) WHERE type = 'DEPOSIT' AND status IN ('PENDING', 'COMPLETED');
+CREATE UNIQUE INDEX transactions_single_cancel ON transactions (cancelled_transaction_id) WHERE type = 'CANCEL';
+
 -- +goose Down
 -- TODO (developer): drop everything created above, in reverse order.
+DROP INDEX IF EXISTS transactions_single_cancel;
+DROP INDEX IF EXISTS transactions_active_settlement;
+DROP INDEX IF EXISTS transactions_idempotency_key;
 DROP TABLE IF EXISTS transactions;
 DROP TABLE IF EXISTS bets;
 DROP SEQUENCE IF EXISTS bet_id_seq;
