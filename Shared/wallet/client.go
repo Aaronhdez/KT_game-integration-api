@@ -45,6 +45,9 @@ func (client *Client) operate(ctx context.Context, path string, operation domain
 }
 
 func (client *Client) sendOperation(ctx context.Context, path string, operation domain.WalletOperation) operationResult {
+	ctx, cancel := context.WithTimeout(ctx, client.config.OperationTimeout)
+	defer cancel()
+
 	body, err := buildRequestBody(operation)
 	if err != nil {
 		return operationResult{err: fmt.Errorf("build wallet request: %v: %w", err, domain.ErrWalletRejected)}

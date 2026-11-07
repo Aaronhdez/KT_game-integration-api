@@ -215,7 +215,36 @@ func TestWithdraw_SendsOneTransactionWithTheOperation(t *testing.T) {
 		`{"userId":34633089486,"currency":"USD","transactions":[{"amount":10.50,"betId":1001,"reference":"8f14e45f-ceea-4f6a-9b1e-0c7a3e2b1d55"}]}`)
 }
 
+// A Wallet that does not answer within OperationTimeout may still apply the
+// operation, so the outcome is unknown, never a failure.
+func TestWithdraw_SlowerThanTimeout_IsUnknown(t *testing.T) {
+	server := givenASlowWallet(t, 2*time.Second)
+	client := newTestClientWithTimeout(server, 50*time.Millisecond)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertErrorIs(t, err, domain.ErrWalletOutcomeUnknown)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// givenASlowWallet starts a fake Wallet that waits for delay before answering
+// with a valid balance. It stops waiting if the client gives up, so the test
+// does not have to wait for the whole delay when it ends. The body is read
+// first: only then does the server notice that the client has gone away.
+func givenASlowWallet(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(delay):
+			io.WriteString(w, `{"balance":"4989.5"}`)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
 
 // sentRequest is what the fake Wallet received.
 type sentRequest struct {
@@ -256,11 +285,16 @@ func givenAWalletAnswering(t *testing.T, status int, body string) *httptest.Serv
 
 // newTestClient returns a Client that calls the fake Wallet and discards its logs.
 func newTestClient(server *httptest.Server) *Client {
+	return newTestClientWithTimeout(server, testTimeout)
+}
+
+// newTestClientWithTimeout is newTestClient with both Wallet timeouts set to timeout.
+func newTestClientWithTimeout(server *httptest.Server, timeout time.Duration) *Client {
 	config := Config{
 		BaseURL:          server.URL,
 		APIKey:           testAPIKey,
-		OperationTimeout: testTimeout,
-		BalanceTimeout:   testTimeout,
+		OperationTimeout: timeout,
+		BalanceTimeout:   timeout,
 	}
 	return NewClient(config, slog.New(slog.DiscardHandler))
 }
