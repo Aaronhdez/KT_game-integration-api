@@ -64,11 +64,25 @@ func (client *Client) sendOperation(ctx context.Context, path string, operation 
 	return responseAsError(responseBody, status)
 }
 
-// decodeSuccess reads the new balance from a 2xx response.
+// decodeSuccess reads the new balance from a 2xx response. The operation was
+// applied whatever the body contains, so any problem with it means "applied,
+// balance unknown", never a failure.
 func decodeSuccess(body []byte) operationResult {
 	var walletResponse operationResponse
-	_ = json.Unmarshal(body, &walletResponse)                        // TODO phase 4: unusable body
-	balance, _ := domain.ParseMoney(walletResponse.Balance.String()) // TODO phase 4: unusable balance
+	if err := json.Unmarshal(body, &walletResponse); err != nil {
+		return operationResult{
+			err: fmt.Errorf("decode wallet response: %v: %w", err, domain.ErrWalletAppliedBalanceUnknown),
+		}
+	}
+
+	// %v, not %w: the Money error is an invalid input, which this is not.
+	balance, err := domain.ParseMoney(walletResponse.Balance.String())
+	if err != nil {
+		return operationResult{
+			err: fmt.Errorf("read wallet balance: %v: %w", err, domain.ErrWalletAppliedBalanceUnknown),
+		}
+	}
+
 	return operationResult{balance: balance}
 }
 

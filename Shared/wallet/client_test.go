@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -50,6 +51,42 @@ func TestWithdraw_Success_ReturnsTheNewBalance(t *testing.T) {
 			assertBalance(t, result, err, testCase.want)
 		})
 	}
+}
+
+func TestWithdraw_SuccessWithUnusableBody_IsAppliedWithUnknownBalance(t *testing.T) {
+	testCases := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid JSON", body: `{"balance":`},
+		{name: "empty body", body: ``},
+		{name: "missing balance", body: `{"transactions":[{"id":1,"reference":"tx-1"}]}`},
+		{name: "balance with three decimals", body: `{"balance":"4989.505"}`},
+		{name: "negative balance", body: `{"balance":"-1.00"}`},
+		{name: "balance that is not a number", body: `{"balance":"abc"}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertErrorIs(t, err, domain.ErrWalletAppliedBalanceUnknown)
+		})
+	}
+}
+
+// The Money parse error must not leak its category: an applied operation is
+// never an invalid request.
+func TestWithdraw_SuccessWithInvalidBalance_IsNotInvalidInput(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"4989.505"}`)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertErrorIsNot(t, err, domain.ErrInvalidInput)
 }
 
 func TestWithdraw_InsufficientBalance_IsInsufficientFunds(t *testing.T) {
@@ -179,6 +216,13 @@ func givenAParsedMoney(t *testing.T, value string) domain.Money {
 		t.Fatalf("invalid test amount %q: %v", value, err)
 	}
 	return money
+}
+
+func assertErrorIsNot(t *testing.T, err, target error) {
+	t.Helper()
+	if errors.Is(err, target) {
+		t.Errorf("expected %v not to be %q", err, target)
+	}
 }
 
 // assertBalance checks that the call succeeded and returned the expected balance.
