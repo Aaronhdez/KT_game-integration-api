@@ -102,6 +102,25 @@ func (r *transactionRepository) FindCancelOf(ctx context.Context, userID domain.
 	return tx, nil
 }
 
+func (r *transactionRepository) Update(ctx context.Context, tx domain.Transaction) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE transactions SET status = $1, new_balance = $2, updated_at = $3
+		WHERE id = $4 AND wallet_user_id = $5`,
+		string(tx.Status),
+		nullableMoney(tx.NewBalance),
+		tx.UpdatedAt,
+		string(tx.ID),
+		int64(tx.UserID),
+	)
+	if err != nil {
+		return fmt.Errorf("update transaction %s: %w", tx.ID, mapUniqueViolation(err))
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrTransactionNotFound
+	}
+	return nil
+}
+
 func scanTransaction(row pgx.Row) (domain.Transaction, error) {
 	var (
 		id                     string

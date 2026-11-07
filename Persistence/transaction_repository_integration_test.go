@@ -262,6 +262,80 @@ func TestTransactionRepository_FindCancelOf_AnotherPlayersCancel_ReturnsTransact
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
+func TestTransactionRepository_Update_CompletedTransaction_StoresStatusNewBalanceAndUpdatedAt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	completeTransaction(t, &withdraw, "89.50")
+
+	err := repository.Update(testContext(t), withdraw)
+
+	assertStoredTransaction(t, pool, err, withdraw)
+}
+
+func TestTransactionRepository_Update_FailedTransaction_KeepsNewBalanceNull(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	failTransaction(t, &withdraw)
+
+	err := repository.Update(testContext(t), withdraw)
+
+	assertStoredTransaction(t, pool, err, withdraw)
+}
+
+func TestTransactionRepository_Update_ChangedAmount_IsNotStored(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	original := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, original)
+	changed := original
+	changed.Amount = parseMoney(t, "99.99")
+
+	err := repository.Update(testContext(t), changed)
+
+	assertStoredTransaction(t, pool, err, original)
+}
+
+func TestTransactionRepository_Update_UnknownTransaction_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	neverInserted := newTestWithdraw(t, pool, eurPlayerID)
+
+	err := repository.Update(testContext(t), neverInserted)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_Update_AnotherPlayersTransaction_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, withdraw)
+	asAnotherPlayer := withdraw
+	asAnotherPlayer.UserID = usdPlayerID
+
+	err := repository.Update(testContext(t), asAnotherPlayer)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_Update_AnotherPlayersTransaction_LeavesItUnchanged(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	original := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, original)
+	asAnotherPlayer := original
+	asAnotherPlayer.UserID = usdPlayerID
+	completeTransaction(t, &asAnotherPlayer, "89.50")
+
+	_ = repository.Update(testContext(t), asAnotherPlayer)
+
+	assertStoredTransaction(t, pool, nil, original)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // newTestWithdraw builds a PENDING withdraw of 10.50 EUR on a fresh bet ID.
@@ -441,4 +515,13 @@ func markCancelled(t *testing.T, tx *domain.Transaction) {
 func newTestCancel(t *testing.T, pool *pgxpool.Pool, original domain.Transaction) domain.Transaction {
 	t.Helper()
 	return domain.NewCancel(newTransactionID(t, pool), original, parseMoney(t, "100.00"), testNow())
+}
+
+// failTransaction marks the transaction as failed in memory, one second after
+// its creation, as a use case would when the Wallet did not apply it.
+func failTransaction(t *testing.T, tx *domain.Transaction) {
+	t.Helper()
+	if err := tx.Fail(tx.CreatedAt.Add(time.Second)); err != nil {
+		t.Fatalf("fail transaction %s: %v", tx.ID, err)
+	}
 }
