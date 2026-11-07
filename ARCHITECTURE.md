@@ -19,10 +19,12 @@ project convention; **Go package names inside them are lowercase**
 ├── Actions/        Use cases that change state (commands): Login, Withdraw,
 │                   Deposit, Cancel, ResolvePending.
 ├── Queries/        Use cases that only read: GetPlayer.
-├── Domain/         Entities and value objects (Money, Currency, Bet,
-│                   Transaction, statuses + transitions), domain errors, and
-│                   ports (interfaces): repositories, WalletClient, Clock,
-│                   IDGenerator, PasswordHasher, TokenIssuer.
+├── Domain/         Entities and value objects (Money, Currency, IDs, Player,
+│                   Bet, Transaction, statuses + transitions), the Cancel
+│                   decision rules (§8.5), domain errors, and ports
+│                   (interfaces): PlayerRepository, WalletClient, Clock,
+│                   IDGenerator, PasswordHasher, TokenIssuer. Bet/transaction
+│                   repositories and locking are added in Phase 04.
 │   └── domaintest/ Test doubles shared by tests (fake Wallet, in-memory repos).
 ├── Persistence/    PostgreSQL implementation of the repository ports,
 │                   unit-of-work/locking, SQL migrations and seed.
@@ -75,6 +77,21 @@ HTTP ─► Application.WithdrawHandler
 ```
 
 The detailed reliability reasoning lives in `DESIGN.md`.
+
+## Domain model (Phase 03)
+
+| Type | Purpose | Rules enforced in `Domain` |
+|---|---|---|
+| `Money` | Exact amount (`shopspring/decimal`, unexported field) | ≥ 0, ≤ 2 decimals, ≤ 18 integer digits; JSON number in and out, never `float64` |
+| `Currency` | `USD`, `EUR`, `KES` | exact uppercase codes only |
+| `UserID`, `BetID`, `TransactionID`, `ProviderTransactionID` | Named ID types | the compiler refuses to mix them; provider ID non-empty, ≤ 128 characters |
+| `Bet` | A wager, created when its withdraw completes | `PLACED → WON/LOST` (`Settle`), `PLACED → CANCELLED` (`Cancel`), `WON/LOST → PLACED` (`RevertSettlement`) |
+| `Transaction` | One money movement (`WITHDRAW`, `DEPOSIT`, `CANCEL`) | born `PENDING`; `→ COMPLETED` / `→ FAILED`; `COMPLETED → CANCELLED` (not for `CANCEL`); withdraw amount > 0 |
+| `DecideCancel` | The §8.5 table as a pure function | returns credit back / debit back / no Wallet call, or the domain error |
+
+Every refused transition returns an error and changes nothing. Domain errors
+wrap one of seven categories (one per API error code), which `Application`
+maps to HTTP with `errors.Is`.
 
 ## Data model (initial)
 
