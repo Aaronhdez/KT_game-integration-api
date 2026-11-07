@@ -289,6 +289,21 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
 4. ~~**Exact login response fields.**~~ **Resolved:** `{"token", "expiresAt"}`
    as recorded in Phase 03 from §8.1.
 
+## Follow-ups after this phase
+
+To do once step 12 is committed, as one commit
+`refactor: merge single-use files into their package's main file`
+(no behaviour change; criterion: one file per concept someone would look up by
+name, small pieces with no life of their own go in their package's main file):
+
+- `Shared/wallet/config.go` → top of `Shared/wallet/client.go`.
+- `Startup/logger.go` → `Startup/main.go` (its test → `Startup/main_test.go`).
+- `Persistence/querier.go` → `Persistence/db.go`.
+
+Kept on purpose: `Application/request.go` (shared by every endpoint with a
+body), `Application/health.go` (an endpoint), `Shared/clock` (ARCHITECTURE.md
+places the clock in `Shared`; counterpart of `domaintest.FixedClock`).
+
 ## Definition of done
 
 - `Domain` still imports only stdlib + `decimal`; `Application` does not import
