@@ -18,7 +18,7 @@ const (
 
 func TestBetRepository_FindByID_ExistingBet_ReturnsTheBet(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	expected := newTestBet(t, pool, eurPlayerID, "9000000000.09")
 	insertBetRow(t, pool, expected)
 
@@ -29,7 +29,7 @@ func TestBetRepository_FindByID_ExistingBet_ReturnsTheBet(t *testing.T) {
 
 func TestBetRepository_FindByID_AnotherPlayersBet_ReturnsBetNotFound(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, bet)
 
@@ -40,7 +40,7 @@ func TestBetRepository_FindByID_AnotherPlayersBet_ReturnsBetNotFound(t *testing.
 
 func TestBetRepository_FindByID_UnknownID_ReturnsBetNotFound(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	neverInserted := newTestBet(t, pool, eurPlayerID, "10.50")
 
 	_, err := repository.FindByID(testContext(t), eurPlayerID, neverInserted.ID)
@@ -50,7 +50,7 @@ func TestBetRepository_FindByID_UnknownID_ReturnsBetNotFound(t *testing.T) {
 
 func TestBetRepository_Insert_NewBet_StoresEveryField(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, eurPlayerID, "9000000000.09")
 
 	err := repository.Insert(testContext(t), bet)
@@ -60,7 +60,7 @@ func TestBetRepository_Insert_NewBet_StoresEveryField(t *testing.T) {
 
 func TestBetRepository_Insert_SameIDTwice_ReturnsError(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, bet)
 
@@ -71,7 +71,7 @@ func TestBetRepository_Insert_SameIDTwice_ReturnsError(t *testing.T) {
 
 func TestBetRepository_Insert_UnknownPlayer_ReturnsError(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, 999, "10.50")
 
 	err := repository.Insert(testContext(t), bet)
@@ -80,7 +80,7 @@ func TestBetRepository_Insert_UnknownPlayer_ReturnsError(t *testing.T) {
 }
 
 func TestBetRepository_NextID_CalledTwice_ReturnsIncreasingIDs(t *testing.T) {
-	repository := NewBetRepository(migratedTestDatabase(t))
+	repository := newBetRepository(migratedTestDatabase(t))
 	first := reserveBetID(t, repository)
 
 	result, err := repository.NextID(testContext(t))
@@ -90,7 +90,7 @@ func TestBetRepository_NextID_CalledTwice_ReturnsIncreasingIDs(t *testing.T) {
 
 func TestBetRepository_NextID_AfterBetsWereInserted_ReturnsAnUnusedID(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	existing := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, existing)
 
@@ -101,7 +101,7 @@ func TestBetRepository_NextID_AfterBetsWereInserted_ReturnsAnUnusedID(t *testing
 
 func TestBetRepository_Update_SettledBet_StoresStatusAndUpdatedAt(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, bet)
 	settleBet(t, &bet, "25.00")
@@ -113,7 +113,7 @@ func TestBetRepository_Update_SettledBet_StoresStatusAndUpdatedAt(t *testing.T) 
 
 func TestBetRepository_Update_ChangedStake_IsNotStored(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	original := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, original)
 	changed := original
@@ -126,7 +126,7 @@ func TestBetRepository_Update_ChangedStake_IsNotStored(t *testing.T) {
 
 func TestBetRepository_Update_UnknownBet_ReturnsBetNotFound(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	neverInserted := newTestBet(t, pool, eurPlayerID, "10.50")
 
 	err := repository.Update(testContext(t), neverInserted)
@@ -136,7 +136,7 @@ func TestBetRepository_Update_UnknownBet_ReturnsBetNotFound(t *testing.T) {
 
 func TestBetRepository_Update_AnotherPlayersBet_ReturnsBetNotFound(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	bet := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, bet)
 	asAnotherPlayer := bet
@@ -149,7 +149,7 @@ func TestBetRepository_Update_AnotherPlayersBet_ReturnsBetNotFound(t *testing.T)
 
 func TestBetRepository_Update_AnotherPlayersBet_LeavesTheBetUnchanged(t *testing.T) {
 	pool := migratedTestDatabase(t)
-	repository := NewBetRepository(pool)
+	repository := newBetRepository(pool)
 	original := newTestBet(t, pool, eurPlayerID, "10.50")
 	insertBetRow(t, pool, original)
 	asAnotherPlayer := original
@@ -182,7 +182,7 @@ func parseMoney(t *testing.T, value string) domain.Money {
 }
 
 // reserveBetID calls the repository's NextID as setup, failing the test on error.
-func reserveBetID(t *testing.T, repository *BetRepository) domain.BetID {
+func reserveBetID(t *testing.T, repository *betRepository) domain.BetID {
 	t.Helper()
 	id, err := repository.NextID(testContext(t))
 	if err != nil {

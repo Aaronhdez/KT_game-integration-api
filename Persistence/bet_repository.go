@@ -7,27 +7,24 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
 
 const betColumns = "id, wallet_user_id, currency, stake::text, status, created_at, updated_at"
 
-var _ domain.BetRepository = (*BetRepository)(nil)
+var _ domain.BetRepository = (*betRepository)(nil)
 
 // BetRepository reads the seeded bets from PostgreSQL.
-type BetRepository struct {
+type betRepository struct {
 	db querier
 }
 
-func NewBetRepository(pool *pgxpool.Pool) *BetRepository {
-	return &BetRepository{
-		db: pool,
-	}
+func newBetRepository(db querier) *betRepository {
+	return &betRepository{db: db}
 }
 
-func (r *BetRepository) FindByID(ctx context.Context, userID domain.UserID, id domain.BetID) (domain.Bet, error) {
+func (r *betRepository) FindByID(ctx context.Context, userID domain.UserID, id domain.BetID) (domain.Bet, error) {
 	query := "SELECT " + betColumns + " FROM bets WHERE id = $1 AND wallet_user_id = $2"
 
 	bet, err := scanBet(r.db.QueryRow(ctx, query, int64(id), int64(userID)))
@@ -37,12 +34,12 @@ func (r *BetRepository) FindByID(ctx context.Context, userID domain.UserID, id d
 	}
 
 	if err != nil {
-		return domain.Bet{}, err
+		return domain.Bet{}, fmt.Errorf("find bet: %w", err)
 	}
 	return bet, nil
 }
 
-func (r *BetRepository) Insert(ctx context.Context, bet domain.Bet) error {
+func (r *betRepository) Insert(ctx context.Context, bet domain.Bet) error {
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO bets (id, wallet_user_id, currency, stake, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -60,7 +57,7 @@ func (r *BetRepository) Insert(ctx context.Context, bet domain.Bet) error {
 	return nil
 }
 
-func (r *BetRepository) NextID(ctx context.Context) (domain.BetID, error) {
+func (r *betRepository) NextID(ctx context.Context) (domain.BetID, error) {
 	var id int64
 	if err := r.db.QueryRow(ctx, "SELECT nextval('bet_id_seq')").Scan(&id); err != nil {
 		return 0, fmt.Errorf("next bet id: %w", err)
@@ -68,7 +65,7 @@ func (r *BetRepository) NextID(ctx context.Context) (domain.BetID, error) {
 	return domain.BetID(id), nil
 }
 
-func (r *BetRepository) Update(ctx context.Context, bet domain.Bet) error {
+func (r *betRepository) Update(ctx context.Context, bet domain.Bet) error {
 	tag, err := r.db.Exec(ctx, `
 		UPDATE bets SET status = $1, updated_at = $2
 		WHERE id = $3 AND wallet_user_id = $4`,
