@@ -22,6 +22,9 @@ type Config struct {
 	WalletAPIKey           string        // secret: never log it
 	WalletOperationTimeout time.Duration // per withdraw/deposit call
 	WalletBalanceTimeout   time.Duration // per balance read attempt
+
+	JWTSecret string        // HMAC key that signs the tokens; secret: never log it
+	JWTTTL    time.Duration // lifetime of an issued token
 }
 
 const (
@@ -34,11 +37,15 @@ const (
 	// read can take up to ~15 s (docs/wallet-findings.md, Q7).
 	defaultWalletOperationTimeout = "6s"
 	defaultWalletBalanceTimeout   = "10s"
+
+	defaultJWTTTL = "1h"
+	// RFC 7518 §3.2: an HS256 key must be at least 256 bits long.
+	minJWTSecretBytes = 32
 )
 
 // LoadConfig reads the configuration from environment variables,
 // applying defaults for unset values and validating every value.
-// Variables without a default (DATABASE_URL, WALLET_API_KEY) are required.
+// Variables without a default (DATABASE_URL, WALLET_API_KEY, JWT_SECRET) are required.
 func LoadConfig() (Config, error) {
 	var cfg Config
 
@@ -90,7 +97,32 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.WalletBalanceTimeout = balanceTimeout
 
+	jwtSecret, err := parseJWTSecret()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.JWTSecret = jwtSecret
+
+	jwtTTL, err := parsePositiveDuration(getEnv("JWT_TTL", defaultJWTTTL))
+	if err != nil {
+		return Config{}, fmt.Errorf("JWT_TTL: %w", err)
+	}
+	cfg.JWTTTL = jwtTTL
+
 	return cfg, nil
+}
+
+// parseJWTSecret reads the required JWT_SECRET and checks its length.
+// The error never contains the value: it is a secret.
+func parseJWTSecret() (string, error) {
+	secret, err := requireEnv("JWT_SECRET")
+	if err != nil {
+		return "", err
+	}
+	if len(secret) < minJWTSecretBytes {
+		return "", fmt.Errorf("JWT_SECRET must be at least %d bytes long, got %d", minJWTSecretBytes, len(secret))
+	}
+	return secret, nil
 }
 
 // parseBaseURL accepts an absolute http or https URL and removes any trailing
