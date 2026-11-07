@@ -45,6 +45,12 @@ var (
 	// operation. The transaction stays PENDING.
 	ErrWalletOutcomeUnknown = errors.New("wallet outcome unknown")
 
+	// ErrWalletAppliedBalanceUnknown means the Wallet applied the operation but
+	// did not report a usable new balance (e.g. it answered that an earlier
+	// attempt with the same reference was already applied). The transaction is
+	// COMPLETED, never FAILED.
+	ErrWalletAppliedBalanceUnknown = errors.New("wallet applied the operation, new balance unknown")
+
 	// ErrAlreadyCancelled means the transaction was already cancelled. The use
 	// case returns the result of the earlier cancel with 200.
 	ErrAlreadyCancelled = errors.New("transaction already cancelled")

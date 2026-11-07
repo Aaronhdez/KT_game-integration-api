@@ -71,7 +71,10 @@ type WalletBalance struct {
 //
 // Withdraw and Deposit:
 //   - nil                     → applied: the returned Money is the new balance.
-//   - ErrInsufficientFunds    → not applied (the transaction becomes FAILED, 422).
+//   - ErrWalletAppliedBalanceUnknown → applied, but the new balance is not
+//     known (an earlier attempt with the same reference was applied, or the
+//     reported balance is unusable). The transaction is COMPLETED.
+//   - ErrInsufficientFunds   → not applied (the transaction becomes FAILED, 422).
 //   - ErrWalletRejected       → not applied, any other definitive rejection (FAILED, 502).
 //   - ErrWalletOutcomeUnknown → it may or may not have been applied: timeout,
 //     dropped connection, 5xx… The transaction stays PENDING (202). It must
