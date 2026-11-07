@@ -38,6 +38,14 @@ type TokenIssuer interface {
 	Issue(userID UserID, now time.Time) (IssuedToken, error)
 }
 
+// TokenVerifier checks a token produced by TokenIssuer and returns its subject,
+// the player's wallet user ID. Every failure (bad signature, expired at now,
+// malformed, wrong algorithm, missing or invalid subject) returns
+// ErrInvalidToken, so callers cannot tell the reasons apart.
+type TokenVerifier interface {
+	Verify(token string, now time.Time) (UserID, error)
+}
+
 // PlayerRepository reads the seeded player accounts. Both methods
 // return ErrPlayerNotFound when there is no such player.
 //   - FindByUsername is used by login.
