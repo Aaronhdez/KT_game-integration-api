@@ -492,7 +492,135 @@ func TestBalance_InvalidResponse_IsNotInvalidInput(t *testing.T) {
 	}
 }
 
+func TestBalance_Rejection_IsWalletFailure(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "400 invalid request", status: http.StatusBadRequest, body: `{"code":"InvalidRequest"}`},
+		{name: "401 wrong api key", status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Balance(context.Background(), 34633089486)
+
+			assertErrorIs(t, err, domain.ErrWalletFailure)
+		})
+	}
+}
+
+// A 4xx will not change on a second attempt, so it is not retried.
+func TestBalance_Rejection_IsNotRetried(t *testing.T) {
+	testCases := []struct {
+		name   string
+		answer walletAnswer
+	}{
+		{name: "400 invalid request", answer: walletAnswer{status: http.StatusBadRequest, body: `{"code":"InvalidRequest"}`}},
+		{name: "401 wrong api key", answer: walletAnswer{status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, requests := givenAWalletAnsweringInTurn(t, testCase.answer, testCase.answer)
+			client := newTestClient(server)
+
+			client.Balance(context.Background(), 34633089486)
+
+			assertRequestCount(t, requests, 1)
+		})
+	}
+}
+
+// A read is always safe to repeat, and ~9 % of them fail randomly
+// (docs/wallet-findings.md, Q6), so a failed read is retried once.
+func TestBalance_ServerErrorThenSuccess_ReturnsTheBalance(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, serverError, balanceOf5000USD)
+	client := newTestClient(server)
+
+	result, err := client.Balance(context.Background(), 34633089486)
+
+	assertWalletBalance(t, result, err, "5000.00", domain.USD)
+}
+
+func TestBalance_DroppedConnectionThenSuccess_ReturnsTheBalance(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, droppedConnection, balanceOf5000USD)
+	client := newTestClient(server)
+
+	result, err := client.Balance(context.Background(), 34633089486)
+
+	assertWalletBalance(t, result, err, "5000.00", domain.USD)
+}
+
+func TestBalance_ServerErrorTwice_IsWalletFailure(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, serverError, serverError)
+	client := newTestClient(server)
+
+	_, err := client.Balance(context.Background(), 34633089486)
+
+	assertErrorIs(t, err, domain.ErrWalletFailure)
+}
+
+// One retry only: the wait stays bounded (assessment §9.5).
+func TestBalance_KeepsFailing_StopsAfterTwoAttempts(t *testing.T) {
+	server, requests := givenAWalletAnsweringInTurn(t, serverError, serverError, serverError)
+	client := newTestClient(server)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertRequestCount(t, requests, 2)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// walletAnswer is one scripted answer of the fake Wallet: a status and body,
+// or a connection closed without any response.
+type walletAnswer struct {
+	status int
+	body   string
+	drop   bool
+}
+
+var (
+	balanceOf5000USD  = walletAnswer{status: http.StatusOK, body: `{"balance":"5000","currency":"USD"}`}
+	serverError       = walletAnswer{status: http.StatusInternalServerError, body: `{"msg":"Internal server response.","code":"666"}`}
+	droppedConnection = walletAnswer{drop: true}
+)
+
+// givenAWalletAnsweringInTurn starts a fake Wallet that gives the answers in
+// order, one per request, repeating the last one when it runs out. It also
+// counts the requests it gets.
+func givenAWalletAnsweringInTurn(t *testing.T, answers ...walletAnswer) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	requests := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn := int(requests.Add(1)) - 1
+		answer := answers[min(turn, len(answers)-1)]
+		if answer.drop {
+			dropConnection(t, w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(answer.status)
+		io.WriteString(w, answer.body)
+	}))
+	t.Cleanup(server.Close)
+	return server, requests
+}
+
+// dropConnection closes the connection without sending a response.
+func dropConnection(t *testing.T, w http.ResponseWriter) {
+	connection, _, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		t.Errorf("hijack connection: %v", err)
+		return
+	}
+	connection.Close()
+}
 
 // givenAWalletDroppingConnections starts a fake Wallet that closes every
 // connection without sending a response. It also counts the requests it gets.
@@ -501,12 +629,7 @@ func givenAWalletDroppingConnections(t *testing.T) (*httptest.Server, *atomic.In
 	requests := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		connection, _, err := http.NewResponseController(w).Hijack()
-		if err != nil {
-			t.Errorf("hijack connection: %v", err)
-			return
-		}
-		connection.Close()
+		dropConnection(t, w)
 	}))
 	t.Cleanup(server.Close)
 	return server, requests

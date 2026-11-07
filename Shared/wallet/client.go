@@ -20,7 +20,23 @@ const (
 	depositPath         = "/api/v1/deposit"
 	balancePath         = "/api/v1/balance/"
 	maxResponseBodySize = 1 << 20
+	balanceAttempts     = 2
+	balanceRetryPause   = 200 * time.Millisecond
 )
+
+type operationResult struct {
+	balance             domain.Money
+	err                 error
+	status              int
+	walletCode          string
+	walletTransactionID int64
+}
+
+type balanceResult struct {
+	balance   domain.WalletBalance
+	err       error
+	retryable bool // a second attempt could succeed
+}
 
 // Client represents a client for interacting with the wallet service.
 type Client struct {
@@ -51,35 +67,62 @@ func (client *Client) Deposit(ctx context.Context, operation domain.WalletOperat
 }
 
 // Balance retrieves the wallet balance for the specified user.
+// It will retry once if the first attempt fails due to a retryable error.
 func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
+	for attempt := 1; ; attempt++ {
+		result := client.readBalance(ctx, userID)
+		if result.err == nil || !result.retryable || attempt == balanceAttempts {
+			return result.balance, result.err
+		}
+
+		select {
+		case <-time.After(balanceRetryPause):
+		case <-ctx.Done():
+			return result.balance, result.err
+		}
+	}
+}
+
+// readBalance makes one attempt to read the balance.
+func (client *Client) readBalance(ctx context.Context, userID domain.UserID) balanceResult {
 	endpointURL := client.config.BaseURL + balancePath + strconv.FormatInt(int64(userID), 10)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
-		return domain.WalletBalance{}, fmt.Errorf("build wallet balance request: %v: %w", err, domain.ErrWalletFailure)
+		return balanceResult{err: fmt.Errorf("build wallet balance request: %v: %w", err, domain.ErrWalletFailure)}
 	}
 	request.Header.Set("x-api-key", client.config.APIKey)
 
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return domain.WalletBalance{}, fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure)
+		return balanceResult{
+			err:       fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure),
+			retryable: true,
+		}
 	}
 	defer response.Body.Close()
 
+	if !isSuccess(response.StatusCode) {
+		return balanceResult{
+			err:       fmt.Errorf("wallet answered status %d: %w", response.StatusCode, domain.ErrWalletFailure),
+			retryable: response.StatusCode >= http.StatusInternalServerError,
+		}
+	}
+
 	var walletResponse balanceResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBodySize)).Decode(&walletResponse); err != nil {
-		return domain.WalletBalance{}, fmt.Errorf("decode wallet balance response: %v: %w", err, domain.ErrWalletFailure)
+		return balanceResult{err: fmt.Errorf("decode wallet balance response: %v: %w", err, domain.ErrWalletFailure)}
 	}
 
 	amount, err := domain.ParseMoney(walletResponse.Balance.String())
 	if err != nil {
-		return domain.WalletBalance{}, fmt.Errorf("parse wallet balance amount: %v: %w", err, domain.ErrWalletFailure)
+		return balanceResult{err: fmt.Errorf("parse wallet balance amount: %v: %w", err, domain.ErrWalletFailure)}
 	}
 	currency, err := domain.ParseCurrency(walletResponse.Currency)
 	if err != nil {
-		return domain.WalletBalance{}, fmt.Errorf("parse wallet balance currency: %v: %w", err, domain.ErrWalletFailure)
+		return balanceResult{err: fmt.Errorf("parse wallet balance currency: %v: %w", err, domain.ErrWalletFailure)}
 	}
 
-	return domain.WalletBalance{Amount: amount, Currency: currency}, nil
+	return balanceResult{balance: domain.WalletBalance{Amount: amount, Currency: currency}}
 }
 
 func (client *Client) operate(ctx context.Context, path string, name string, operation domain.WalletOperation) (domain.Money, error) {
@@ -236,12 +279,4 @@ func describeOutcome(err error) (string, slog.Level) {
 	default:
 		return "unknown", slog.LevelWarn
 	}
-}
-
-type operationResult struct {
-	balance             domain.Money
-	err                 error
-	status              int
-	walletCode          string
-	walletTransactionID int64
 }
