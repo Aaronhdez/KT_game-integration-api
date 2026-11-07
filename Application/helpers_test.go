@@ -3,9 +3,17 @@ package application
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 )
+
+func assertErrorIs(t *testing.T, err, target error) {
+	t.Helper()
+	if !errors.Is(err, target) {
+		t.Errorf("expected %v to be %q", err, target)
+	}
+}
 
 func assertContentTypeJSON(t *testing.T, recorder *httptest.ResponseRecorder) {
 	t.Helper()
