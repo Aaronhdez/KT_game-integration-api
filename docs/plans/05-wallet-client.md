@@ -214,6 +214,24 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
 4. ~~**Real-Wallet tests: keep or drop?**~~ **Resolved:** dropped, to keep the
    solution minimal (reasons in the design decisions table).
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Developer writes the production code of 4–6; Claude the tests | Developer wrote it from step-by-step instructions; Claude wrote all tests and, on request, parts of the code (the `switch` of `classifyOperation`, the response handling of `sendOperation`, the end of both loggers) and the two readability refactors | The developer asked for help on the larger pieces. |
+| Steps 5 and 6 as one commit each | Built **test-first in small increments**, one commit each: withdraw success → balance formats → non-2xx → unusable body → payload and headers → timeout → dropped connection → log → deposit; then balance success → request and invalid answers → retry → per-attempt timeout → log → compile-time port check | The developer wanted every piece of production code to be demanded by a failing test. |
+| `sendOperation` in one function | Split into `newRequest` / `buildRequestBody` / `setHeaders` and `decodeSuccess` / `decodeFailure`; `isSuccess` shared with `classifyOperation` | Readability; a request that was never sent maps to `ErrWalletRejected` in one place. |
+| `Balance` in one function | `Balance` (retry loop) → `readBalance` → `newBalanceRequest` / `networkFailure` / `statusFailure` / `decodeBalance`, at the bottom of `client.go` in call order | Each helper owns one kind of failure and says whether it is retried. |
+| One logger | `logOperation` + `describeOutcome` for operations, `logBalanceRead` + `describeBalanceOutcome` for reads (`ok` / `timeout` / `failure`, all failures at `warn`) | Different fields (`attempt` vs `bet_id`, `reference`, `wallet_code`) and outcomes. |
+| — | `Accept` header dropped | No test or Wallet behaviour needs it. |
+| — | Test helpers drain the request body before waiting | Found while testing: Go's server only notices that the client has gone (and cancels `r.Context()`) once the handler has read the whole body; without it a timeout test took 2 s instead of 50 ms. |
+| — | `go vet` forced the `Do` error check from the first increment | Its `httpresponse` analyzer rejects using a response before checking the error. |
+| `Startup/config_test.go` with full `Config` literals | Cases start from `expectedDefaultConfig()` and change one field (`adjust func(*Config)`) | Eight fields made each literal too long. |
+| — | `AGENTS.md`: `go run ./Startup` needs `WALLET_API_KEY` too | The comment had become wrong in step 3. |
+| Real-Wallet tests (`wallet` build tag) | Dropped before implementation | Already measured in Phase 01; slow, needs Docker and a re-send loop. A manual `curl` check comes with Phase 07. |
+
+No new dependencies.
+
 ## Definition of done
 
 - `Shared/wallet` imports only the standard library and `Domain` from this repo;
