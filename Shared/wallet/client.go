@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -44,10 +45,17 @@ func (client *Client) operate(ctx context.Context, path string, operation domain
 }
 
 func (client *Client) sendOperation(ctx context.Context, path string, operation domain.WalletOperation) operationResult {
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.BaseURL+path, nil)
+	body, err := buildRequestBody(operation)
 	if err != nil {
 		return operationResult{err: fmt.Errorf("build wallet request: %v: %w", err, domain.ErrWalletRejected)}
 	}
+
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return operationResult{err: fmt.Errorf("build wallet request: %v: %w", err, domain.ErrWalletRejected)}
+	}
+
+	setHeaders(httpRequest, operation, client)
 
 	response, err := client.httpClient.Do(httpRequest)
 	if err != nil {
@@ -84,6 +92,29 @@ func decodeSuccess(body []byte) operationResult {
 	}
 
 	return operationResult{balance: balance}
+}
+
+// buildRequestBody encodes the operation as the Wallet's list payload, always
+// with exactly one transaction.
+func buildRequestBody(operation domain.WalletOperation) ([]byte, error) {
+	request := operationRequest{
+		UserID:   int64(operation.UserID),
+		Currency: string(operation.Currency),
+		Transactions: []operationTransaction{
+			{
+				Amount:    json.Number(operation.Amount.String()),
+				BetID:     int64(operation.BetID),
+				Reference: string(operation.Reference),
+			},
+		},
+	}
+	return json.Marshal(request)
+}
+
+func setHeaders(httpRequest *http.Request, operation domain.WalletOperation, client *Client) {
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("X-Trace-ID", string(operation.Reference))
+	httpRequest.Header.Set("X-Api-Key", client.config.APIKey)
 }
 
 // responseAsError classifies a non-2xx answer by its status and the Wallet's

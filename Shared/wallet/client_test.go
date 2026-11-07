@@ -172,7 +172,74 @@ func TestWithdraw_ServerError_IsUnknown(t *testing.T) {
 	}
 }
 
+func TestWithdraw_PostsToTheWithdrawEndpoint(t *testing.T) {
+	server, sent := givenAWalletRecordingRequests(t)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertEndpoint(t, sent, err, http.MethodPost, "/api/v1/withdraw")
+}
+
+func TestWithdraw_SendsTheExpectedHeaders(t *testing.T) {
+	testCases := []struct {
+		header string
+		want   string
+	}{
+		{header: "x-api-key", want: testAPIKey},
+		{header: "Content-Type", want: "application/json"},
+		{header: "X-TRACE-ID", want: "8f14e45f-ceea-4f6a-9b1e-0c7a3e2b1d55"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.header, func(t *testing.T) {
+			server, sent := givenAWalletRecordingRequests(t)
+			client := newTestClient(server)
+
+			_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertHeader(t, sent, err, testCase.header, testCase.want)
+		})
+	}
+}
+
+// The amount travels as a JSON number with two decimals, and the list payload
+// always carries exactly one transaction (docs/wallet-findings.md, Q4 and Q8).
+func TestWithdraw_SendsOneTransactionWithTheOperation(t *testing.T) {
+	server, sent := givenAWalletRecordingRequests(t)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertBody(t, sent, err,
+		`{"userId":34633089486,"currency":"USD","transactions":[{"amount":10.50,"betId":1001,"reference":"8f14e45f-ceea-4f6a-9b1e-0c7a3e2b1d55"}]}`)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// sentRequest is what the fake Wallet received.
+type sentRequest struct {
+	method string
+	path   string
+	header http.Header
+	body   string
+}
+
+// givenAWalletRecordingRequests starts a fake Wallet that stores the request it
+// receives and answers with a valid balance. The stored request can be read
+// once the client call has returned.
+func givenAWalletRecordingRequests(t *testing.T) (*httptest.Server, *sentRequest) {
+	t.Helper()
+	sent := &sentRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		*sent = sentRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"balance":"4989.5"}`)
+	}))
+	t.Cleanup(server.Close)
+	return server, sent
+}
 
 // givenAWalletAnswering starts a fake Wallet that answers every request with
 // the given status and JSON body. It is stopped when the test ends.
@@ -222,6 +289,30 @@ func assertErrorIsNot(t *testing.T, err, target error) {
 	t.Helper()
 	if errors.Is(err, target) {
 		t.Errorf("expected %v not to be %q", err, target)
+	}
+}
+
+func assertEndpoint(t *testing.T, sent *sentRequest, err error, method, path string) {
+	t.Helper()
+	assertNoError(t, err)
+	if sent.method != method || sent.path != path {
+		t.Errorf("expected %s %s, got %s %s", method, path, sent.method, sent.path)
+	}
+}
+
+func assertHeader(t *testing.T, sent *sentRequest, err error, name, want string) {
+	t.Helper()
+	assertNoError(t, err)
+	if result := sent.header.Get(name); result != want {
+		t.Errorf("expected header %s = %q, got %q", name, want, result)
+	}
+}
+
+func assertBody(t *testing.T, sent *sentRequest, err error, want string) {
+	t.Helper()
+	assertNoError(t, err)
+	if sent.body != want {
+		t.Errorf("expected body\n  %s\ngot\n  %s", want, sent.body)
 	}
 }
 
