@@ -6,11 +6,14 @@ import (
 	"time"
 )
 
-func TestLoadConfig_NoVariablesSet_UsesDefaults(t *testing.T) {
+const testDatabaseURL = "postgres://user:secret@localhost:5432/db"
+
+func TestLoadConfig_OnlyRequiredVariablesSet_UsesDefaults(t *testing.T) {
 	expected := Config{
 		HTTPPort:        8080,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: 10 * time.Second,
+		DatabaseURL:     testDatabaseURL,
 	}
 	setEnv(t, map[string]string{})
 
@@ -28,17 +31,17 @@ func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
 		{
 			name: "custom HTTP port",
 			env:  map[string]string{"HTTP_PORT": "9090"},
-			want: Config{HTTPPort: 9090, LogLevel: slog.LevelInfo, ShutdownTimeout: 10 * time.Second},
+			want: Config{HTTPPort: 9090, LogLevel: slog.LevelInfo, ShutdownTimeout: 10 * time.Second, DatabaseURL: testDatabaseURL},
 		},
 		{
 			name: "custom log level",
 			env:  map[string]string{"LOG_LEVEL": "DEBUG"},
-			want: Config{HTTPPort: 8080, LogLevel: slog.LevelDebug, ShutdownTimeout: 10 * time.Second},
+			want: Config{HTTPPort: 8080, LogLevel: slog.LevelDebug, ShutdownTimeout: 10 * time.Second, DatabaseURL: testDatabaseURL},
 		},
 		{
 			name: "custom shutdown timeout",
 			env:  map[string]string{"SHUTDOWN_TIMEOUT": "5s"},
-			want: Config{HTTPPort: 8080, LogLevel: slog.LevelInfo, ShutdownTimeout: 5 * time.Second},
+			want: Config{HTTPPort: 8080, LogLevel: slog.LevelInfo, ShutdownTimeout: 5 * time.Second, DatabaseURL: testDatabaseURL},
 		},
 	}
 
@@ -78,6 +81,10 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			name: "port zero",
 			env:  map[string]string{"HTTP_PORT": "0"},
 		},
+		{
+			name: "missing database url",
+			env:  map[string]string{"DATABASE_URL": ""},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -93,13 +100,15 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 	}
 }
 
+// setEnv starts every case from a clean environment that contains only the
+// required variables, then applies env on top. Empty means "unset".
+// t.Setenv restores the previous values when the test ends.
 func setEnv(t *testing.T, env map[string]string) {
 	t.Helper()
-	// Start every case from a clean environment: empty means "unset".
-	// t.Setenv restores the previous value when the test ends.
 	for _, key := range []string{"HTTP_PORT", "LOG_LEVEL", "SHUTDOWN_TIMEOUT"} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("DATABASE_URL", testDatabaseURL)
 	for key, value := range env {
 		t.Setenv(key, value)
 	}

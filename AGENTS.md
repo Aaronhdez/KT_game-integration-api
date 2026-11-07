@@ -119,10 +119,13 @@ gofmt -l .                          # must print nothing (files must use LF; see
 go vet ./...
 go build ./...
 go test ./...
-go run ./Startup                    # serves on :8080; GET /health
+go run ./Startup                    # needs DATABASE_URL (see README); serves on :8080; GET /health
 go list -f '{{.GoFiles}}' ./...     # check no test helpers leaked into production files
+
+# Integration tests (need PostgreSQL and TEST_DATABASE_URL; see README)
+go vet -tags=integration ./...
+go test -count=1 -tags=integration ./Persistence/...
 ```
 
-> Not available yet: `go test -tags=integration ./...` (Phase 04),
-> `docker compose up --build` / `docker compose down -v` (Phase 12).
+> Not available yet: `docker compose up --build` / `docker compose down -v` (Phase 12).
 > There is no Makefile: `make` is not installed on the developer's Windows machine.

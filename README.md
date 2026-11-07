@@ -33,12 +33,25 @@ Services: API on `http://localhost:8080`, mock Wallet on `http://localhost:8000`
 
 ## Running locally (without Docker)
 
-Needs Go (64-bit). Every variable has a default, so no setup is required:
+Needs Go (64-bit) and a PostgreSQL 16 database. Start one with Docker:
 
 ```bash
-go run ./Startup
+docker run --rm -d --name gameapi-db -p 5432:5432 \
+  -e POSTGRES_USER=gameapi -e POSTGRES_PASSWORD=gameapi -e POSTGRES_DB=gameapi \
+  postgres:16-alpine
+```
+
+`DATABASE_URL` is the only required variable; every other one has a default:
+
+```bash
+DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable" go run ./Startup
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
+
+In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`
+then `go run ./Startup`. If the database cannot be reached within 10 seconds the
+service exits with code 1. Stop the container with `docker stop gameapi-db`
+(`--rm` deletes it, and its data, when it stops).
 
 On Windows PowerShell use `curl.exe` (plain `curl` is an alias of
 `Invoke-WebRequest`). Stop the service with Ctrl+C: it finishes in-flight
@@ -53,9 +66,31 @@ The program does not read `.env` itself; Docker Compose does (Phase 12).
 ```bash
 gofmt -l .                        # must print nothing
 go vet ./...
+go vet -tags=integration ./...    # also checks the integration test files
 go test ./...                     # unit tests, no Docker needed
-go test -tags=integration ./...   # needs PostgreSQL (from Phase 04)
 ```
+
+### Integration tests (PostgreSQL)
+
+Files named `*_integration_test.go` carry the build tag `integration`: they only
+compile with `-tags=integration`, so `go test ./...` never needs a database.
+They run against the database in `TEST_DATABASE_URL`; without it they fail
+instead of being skipped. With the container from "Running locally", create a
+separate test database once:
+
+```bash
+docker exec gameapi-db createdb -U gameapi gameapi_test
+TEST_DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi_test?sslmode=disable" \
+  go test -count=1 -tags=integration ./Persistence/...
+```
+
+In PowerShell set `$env:TEST_DATABASE_URL=...` first. The tests migrate the
+database themselves, drop and recreate its schema in one test, and create rows
+with fresh IDs, so the test database must not be the one the service uses.
+`-count=1` disables Go's test result cache.
+
+To make VS Code (gopls) analyse these files, add
+`"gopls": { "buildFlags": ["-tags=integration"] }` to your user settings.
 
 ## Configuration
 
@@ -68,7 +103,7 @@ An invalid value stops the service at startup with an error naming the variable.
 | `HTTP_PORT` | API listen port (1–65535) | `8080` | Phase 02 |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (case-insensitive) | `info` | Phase 02 |
 | `SHUTDOWN_TIMEOUT` | Max time to finish in-flight requests on shutdown (Go duration: `500ms`, `10s`, `1m`) | `10s` | Phase 02 |
-| `DATABASE_URL` | PostgreSQL connection string | — | Phase 04 |
+| `DATABASE_URL` | PostgreSQL connection string (**required**). Pool options such as `pool_max_conns=10` can be added as URL parameters | — | Phase 04 |
 | `WALLET_BASE_URL` | Wallet base URL | `http://wallet:8000` | Phase 05 |
 | `WALLET_API_KEY` | Wallet `x-api-key` header | — | Phase 05 |
 | `WALLET_TIMEOUT` | Timeout per Wallet call | `3s` | Phase 05 |
@@ -80,14 +115,16 @@ the phase that reads them is implemented.
 
 ## Seeded players
 
-*TBD (Phase 04).*
+Created by the migration `Persistence/migrations/00004_seed_players.sql` when the
+service starts. They match the users of the Wallet mock; the database stores
+only bcrypt hashes of these passwords (test credentials, valid only locally).
 
-| Username | Password | Wallet user ID | Currency |
-|---|---|---|---|
-| *TBD* | *TBD* | 34633089486 | USD |
-| *TBD* | *TBD* | 34679664254 | EUR |
-| *TBD* | *TBD* | 34616761765 | KES |
-| *TBD* | *TBD* | 34673635133 | USD |
+| Username | Password | Wallet user ID | Currency | Initial Wallet balance |
+|---|---|---|---|---|
+| `player_usd` | `usd-pass-2026` | 34633089486 | USD | 5000 |
+| `player_eur` | `eur-pass-2026` | 34679664254 | EUR | 9000000000 |
+| `player_kes` | `kes-pass-2026` | 34616761765 | KES | 750.5 |
+| `player_usd_2` | `usd2-pass-2026` | 34673635133 | USD | 31415.25 |
 
 ## API
 

@@ -10,8 +10,8 @@
 | Wallet returns an error **before** applying the operation | *TBD (05, 08)* | |
 | Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. It is resolved by re-sending the identical request: `409 DuplicatedTransaction` means it had been applied. *Details: 05, 08, 11.* | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
 | Wallet times out | *TBD (05, 08)* | |
-| Process stops between the Wallet call and the DB write | *TBD (08, 11)* | |
-| Provider retries / sends the same request concurrently | *TBD (08)* | |
+| Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. *Resolution: 08, 11.* | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
+| Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, so a retry sees the first request's transaction (replay or `409`). The unique index `(wallet_user_id, provider_transaction_id)` is the safety net if two requests ever race past it (e.g. two API instances). *Replay rules: 08.* | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
 | Wallet restarts and loses its state | Not detected. After a restart the Wallet is back at its seeded balances and has forgotten which requests it applied, so re-sending a `PENDING` request would apply it again. Accepted risk. *Mitigations, if any: 11.* | The Wallet keeps everything in memory and has no endpoint to query past transactions (findings Q1, Q10). In this setup it only restarts on purpose, and the documented reset (`docker compose down -v`) also wipes our database. |
 
 ## 2. How a PENDING transaction gets resolved
@@ -66,6 +66,35 @@ before any Wallet call, so a mismatch is our `400`, not a Wallet error.
 (its outcome must be resolved first), a `FAILED` one is `409` (nothing to revert),
 an already `CANCELLED` one returns the earlier cancel (`200`), and a `CANCEL`
 transaction itself cannot be cancelled.
+
+**Per-player lock (Phase 04).** Each operation takes a PostgreSQL session
+advisory lock keyed by the player's wallet user ID and runs all its queries on
+that same connection. A session lock (not a transaction lock or
+`SELECT … FOR UPDATE`) is needed because the lock must survive the commit of the
+`PENDING` transaction and the Wallet call that follows. Using one connection
+for lock and work means an operation never waits for a second connection while
+holding the first, so the pool cannot deadlock. It works with several API
+instances, and a crash releases the lock automatically. Cost: each in-flight
+operation holds one pooled connection for the duration of its Wallet call, so
+the pool size (`pool_max_conns` in `DATABASE_URL`) bounds how many different
+players can operate at once. If the lock cannot be taken or released cleanly,
+the connection is closed instead of reused, which releases any lock it holds.
+*Rejected:* an in-process mutex per player (simplest, but only correct with a
+single instance) and a lease column with expiry (more code, overlapping
+operations if a call outlives the lease).
+
+**Database constraints as the last line of defence (Phase 04).** Idempotency
+(`(wallet_user_id, provider_transaction_id)`), "one active settlement per bet"
+and "one cancel per transaction" are partial unique indexes, and the domain's
+amount and status rules are `CHECK` constraints. The repositories translate
+violations of the three business indexes into domain errors, so use cases never
+see PostgreSQL errors. The idempotency key is scoped per player: one player's
+provider ID can never collide with, or reveal, another player's transaction.
+
+**Money in PostgreSQL (Phase 04).** Amounts are `NUMERIC(20,2)` and cross the
+Go/SQL boundary as text (`Money.String()` in, `amount::text` out, then
+`ParseMoney`): exact in both directions, and every value read is validated
+again by the domain.
 
 **Missing `amount` in a deposit (to handle in Phase 09).** If the field is absent,
 JSON decoding leaves the amount at zero without calling our decoder — which for a

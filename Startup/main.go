@@ -9,6 +9,15 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	persistence "github.com/aaronhdez/kt_game-integration-api/Persistence"
+)
+
+const (
+	databaseConnectTimeout = 10 * time.Second
+	databaseMigrateTimeout = 30 * time.Second
 )
 
 func main() {
@@ -27,6 +36,17 @@ func run() error {
 	}
 
 	logger := setupLogging(cfg)
+
+	pool, err := connectDatabase(cfg.DatabaseURL, logger)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := migrateDatabase(pool, logger); err != nil {
+		return err
+	}
+
 	server := newHTTPServer(cfg, NewRouter(logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -48,6 +68,37 @@ func setupLogging(cfg Config) *slog.Logger {
 	)
 	logger.Debug("debug logging enabled")
 	return logger
+}
+
+// connectDatabase opens the PostgreSQL pool, giving up after
+// databaseConnectTimeout so a missing database stops the service quickly.
+func connectDatabase(databaseURL string, logger *slog.Logger) (*pgxpool.Pool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), databaseConnectTimeout)
+	defer cancel()
+
+	pool, err := persistence.Connect(ctx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect to database: %w", err)
+	}
+
+	// Host and database name only: the URL contains the password.
+	connConfig := pool.Config().ConnConfig
+	logger.Info("database connected", "host", connConfig.Host, "database", connConfig.Database)
+	return pool, nil
+}
+
+// migrateDatabase brings the schema up to date before the service accepts
+// requests, so the code never runs against an older schema.
+func migrateDatabase(pool *pgxpool.Pool, logger *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), databaseMigrateTimeout)
+	defer cancel()
+
+	applied, err := persistence.Migrate(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	logger.Info("database migrations applied", "applied_versions", applied)
+	return nil
 }
 
 func newHTTPServer(cfg Config, router http.Handler) *http.Server {

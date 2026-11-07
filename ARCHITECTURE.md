@@ -22,12 +22,13 @@ project convention; **Go package names inside them are lowercase**
 ├── Domain/         Entities and value objects (Money, Currency, IDs, Player,
 │                   Bet, Transaction, statuses + transitions), the Cancel
 │                   decision rules (§8.5), domain errors, and ports
-│                   (interfaces): PlayerRepository, WalletClient, Clock,
-│                   IDGenerator, PasswordHasher, TokenIssuer. Bet/transaction
-│                   repositories and locking are added in Phase 04.
+│                   (interfaces): PlayerRepository, BetRepository,
+│                   TransactionRepository, UnitOfWork, PlayerLocker,
+│                   WalletClient, Clock, IDGenerator, PasswordHasher, TokenIssuer.
 │   └── domaintest/ Test doubles shared by tests (fake Wallet, in-memory repos).
-├── Persistence/    PostgreSQL implementation of the repository ports,
-│                   unit-of-work/locking, SQL migrations and seed.
+├── Persistence/    PostgreSQL (pgx) implementation of the repository ports,
+│                   per-player lock + unit of work, embedded SQL migrations
+│                   (goose) and the seed of the four Wallet players.
 ├── Shared/         Adapters to things that are not the API itself:
 │                   Wallet HTTP client, JWT, bcrypt, clock, ID generation.
 └── docs/plans/     Master plan and per-phase plans.
@@ -93,14 +94,42 @@ Every refused transition returns an error and changes nothing. Domain errors
 wrap one of seven categories (one per API error code), which `Application`
 maps to HTTP with `errors.Is`.
 
-## Data model (initial)
+## Data model (Phase 04)
 
-| Table | Key columns |
-|---|---|
-| `players` | `wallet_user_id BIGINT PK`, `username UNIQUE`, `password_hash`, `currency` |
-| `bets` | `id BIGINT PK` (betId sent to the Wallet), `wallet_user_id`, `currency`, `status` |
-| `transactions` | `id UUID PK`, `type`, `status`, `wallet_user_id`, `bet_id`, `provider_transaction_id`, `cancelled_transaction_id`, `amount NUMERIC(20,2)`, `currency`, `old_balance`, `new_balance`, `payload_hash`, `wallet_reference`, timestamps |
+Migrations live in `Persistence/migrations/` (embedded in the binary, applied by
+goose at startup): `00001_create_players`, `00002_create_bets`,
+`00003_create_transactions`, `00004_seed_players`. A migration that has been
+applied is never edited; changes go in a new file.
 
-Constraints carry part of the correctness: `UNIQUE(provider_transaction_id)` for
-WITHDRAW/DEPOSIT, `UNIQUE(cancelled_transaction_id)` for CANCEL, a partial unique
-index guaranteeing a single active settlement per bet. Final schema: Phase 04.
+| Table | Columns | Constraints |
+|---|---|---|
+| `players` | `wallet_user_id BIGINT PK`, `username`, `password_hash` (bcrypt), `currency`, `created_at` | `UNIQUE(username)`, currency check |
+| `bets` | `id BIGINT PK` (the `betId` sent to the Wallet, from sequence `bet_id_seq`), `wallet_user_id → players`, `currency`, `stake NUMERIC(20,2)`, `status`, timestamps | status/currency checks, `stake > 0` |
+| `transactions` | `id UUID PK`, `type`, `status`, `wallet_user_id → players`, `bet_id` (no FK: a PENDING withdraw's bet does not exist yet), `provider_transaction_id`, `cancelled_transaction_id → transactions` (CANCEL only), `amount`, `currency`, `old_balance`, `new_balance` (NULL until completed), timestamps | type/status/currency checks, `amount >= 0`, withdraw `amount > 0`, `cancelled_transaction_id` present iff `CANCEL` |
+
+The unique indexes carry business rules, so they hold even if Go code is wrong
+or two instances race:
+
+| Index (partial, on `transactions`) | Rule | Domain error on violation |
+|---|---|---|
+| `transactions_idempotency_key` `(wallet_user_id, provider_transaction_id)` where `WITHDRAW`/`DEPOSIT` | One transaction per provider ID and player (§7.1) | `ErrTransactionExists` |
+| `transactions_active_settlement` `(bet_id)` where `DEPOSIT` and `PENDING`/`COMPLETED` | One active settlement per bet (§8.4) | `ErrBetAlreadySettled` |
+| `transactions_single_cancel` `(cancelled_transaction_id)` where `CANCEL` | One cancel per transaction (§8.5) | `ErrAlreadyCancelled` |
+
+## Persistence ports (Phase 04)
+
+```
+PlayerLocker.WithPlayerLock(ctx, userID, func(ctx, uow UnitOfWork) error)
+   └─ UnitOfWork.Atomic(ctx, func(ctx, repos Repositories) error)   // one DB transaction
+         └─ Repositories{Transactions, Bets}
+PlayerRepository (FindByUsername, FindByID)                          // standalone, for login
+```
+
+- **Lock:** a PostgreSQL session advisory lock keyed by the wallet user ID, held
+  on one pooled connection; every query of the operation runs on that same
+  connection. It outlives the commit of the PENDING transaction, so the player
+  stays locked across the Wallet call. PostgreSQL releases it if the process dies.
+- **Reads are scoped by player:** every `Find…`/`Update` filters by
+  `wallet_user_id`, so another player's bet or transaction is "not found".
+- **Money** is written as text (`Money.String()`) and read as `amount::text` →
+  `domain.ParseMoney`: exact both ways, and re-validated on every read.
