@@ -93,14 +93,16 @@ the phase that reads them is implemented.
 
 ## Seeded players
 
-*TBD (Phase 04).*
+Created by the migration `Persistence/migrations/00004_seed_players.sql` when the
+service starts. They match the users of the Wallet mock; the database stores
+only bcrypt hashes of these passwords (test credentials, valid only locally).
 
-| Username | Password | Wallet user ID | Currency |
-|---|---|---|---|
-| *TBD* | *TBD* | 34633089486 | USD |
-| *TBD* | *TBD* | 34679664254 | EUR |
-| *TBD* | *TBD* | 34616761765 | KES |
-| *TBD* | *TBD* | 34673635133 | USD |
+| Username | Password | Wallet user ID | Currency | Initial Wallet balance |
+|---|---|---|---|---|
+| `player_usd` | `usd-pass-2026` | 34633089486 | USD | 5000 |
+| `player_eur` | `eur-pass-2026` | 34679664254 | EUR | 9000000000 |
+| `player_kes` | `kes-pass-2026` | 34616761765 | KES | 750.5 |
+| `player_usd_2` | `usd2-pass-2026` | 34673635133 | USD | 31415.25 |
 
 ## API
 
