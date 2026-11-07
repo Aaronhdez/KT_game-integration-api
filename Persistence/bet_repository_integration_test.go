@@ -48,6 +48,37 @@ func TestBetRepository_FindByID_UnknownID_ReturnsBetNotFound(t *testing.T) {
 	assertErrorIs(t, err, domain.ErrBetNotFound)
 }
 
+func TestBetRepository_Insert_NewBet_StoresEveryField(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	bet := newTestBet(t, pool, eurPlayerID, "9000000000.09")
+
+	err := repository.Insert(testContext(t), bet)
+
+	assertStoredBet(t, pool, err, bet)
+}
+
+func TestBetRepository_Insert_SameIDTwice_ReturnsError(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	bet := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, bet)
+
+	err := repository.Insert(testContext(t), bet)
+
+	assertError(t, err)
+}
+
+func TestBetRepository_Insert_UnknownPlayer_ReturnsError(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	bet := newTestBet(t, pool, 999, "10.50")
+
+	err := repository.Insert(testContext(t), bet)
+
+	assertError(t, err)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // testNow is "now" at the precision PostgreSQL stores (microseconds), so a
@@ -79,6 +110,57 @@ func insertBetRow(t *testing.T, pool *pgxpool.Pool, bet domain.Bet) {
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		int64(bet.ID), int64(bet.UserID), string(bet.Currency), bet.Stake.String(),
 		string(bet.Status), bet.CreatedAt, bet.UpdatedAt)
+}
+
+// readBetRow reads a bet with plain SQL, independently of the repository under test.
+func readBetRow(t *testing.T, pool *pgxpool.Pool, id domain.BetID) domain.Bet {
+	t.Helper()
+	var (
+		userID    int64
+		currency  string
+		stakeText string
+		status    string
+		createdAt time.Time
+		updatedAt time.Time
+	)
+	err := pool.QueryRow(testContext(t), `
+		SELECT wallet_user_id, currency, stake::text, status, created_at, updated_at
+		FROM bets WHERE id = $1`, int64(id)).
+		Scan(&userID, &currency, &stakeText, &status, &createdAt, &updatedAt)
+	if err != nil {
+		t.Fatalf("read bet %d: %v", id, err)
+	}
+	stake, err := domain.ParseMoney(stakeText)
+	if err != nil {
+		t.Fatalf("parse stake %q of bet %d: %v", stakeText, id, err)
+	}
+	return domain.Bet{
+		ID:        id,
+		UserID:    domain.UserID(userID),
+		Currency:  domain.Currency(currency),
+		Stake:     stake,
+		Status:    domain.BetStatus(status),
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}
+}
+
+// assertStoredBet checks that the write succeeded and that the row in the
+// database, read with plain SQL, equals expected.
+func assertStoredBet(t *testing.T, pool *pgxpool.Pool, err error, expected domain.Bet) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := readBetRow(t, pool, expected.ID)
+	assertBet(t, result, nil, expected)
+}
+
+func assertError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("expected an error, got nil")
+	}
 }
 
 // assertBet compares field by field: Money and time.Time need Equal, not ==

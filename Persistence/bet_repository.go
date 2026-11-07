@@ -42,6 +42,24 @@ func (r *BetRepository) FindByID(ctx context.Context, userID domain.UserID, id d
 	return bet, nil
 }
 
+func (r *BetRepository) Insert(ctx context.Context, bet domain.Bet) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO bets (id, wallet_user_id, currency, stake, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		int64(bet.ID),
+		int64(bet.UserID),
+		string(bet.Currency),
+		bet.Stake.String(),
+		string(bet.Status),
+		bet.CreatedAt,
+		bet.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert bet %d: %w", bet.ID, err)
+	}
+	return nil
+}
+
 func scanBet(row pgx.Row) (domain.Bet, error) {
 	var (
 		id           int64
