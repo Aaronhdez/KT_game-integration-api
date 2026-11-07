@@ -83,51 +83,6 @@ func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain
 	}
 }
 
-// readBalance makes one attempt to read the balance.
-func (client *Client) readBalance(ctx context.Context, userID domain.UserID) balanceResult {
-	ctx, cancel := context.WithTimeout(ctx, client.config.BalanceTimeout)
-	defer cancel()
-
-	endpointURL := client.config.BaseURL + balancePath + strconv.FormatInt(int64(userID), 10)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
-	if err != nil {
-		return balanceResult{err: fmt.Errorf("build wallet balance request: %v: %w", err, domain.ErrWalletFailure)}
-	}
-	request.Header.Set("x-api-key", client.config.APIKey)
-
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return balanceResult{err: fmt.Errorf("wallet balance timed out: %v: %w", err, domain.ErrWalletTimeout), retryable: true}
-		}
-		return balanceResult{err: fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure), retryable: true}
-	}
-	defer response.Body.Close()
-
-	if !isSuccess(response.StatusCode) {
-		return balanceResult{
-			err:       fmt.Errorf("wallet answered status %d: %w", response.StatusCode, domain.ErrWalletFailure),
-			retryable: response.StatusCode >= http.StatusInternalServerError,
-		}
-	}
-
-	var walletResponse balanceResponse
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBodySize)).Decode(&walletResponse); err != nil {
-		return balanceResult{err: fmt.Errorf("decode wallet balance response: %v: %w", err, domain.ErrWalletFailure)}
-	}
-
-	amount, err := domain.ParseMoney(walletResponse.Balance.String())
-	if err != nil {
-		return balanceResult{err: fmt.Errorf("parse wallet balance amount: %v: %w", err, domain.ErrWalletFailure)}
-	}
-	currency, err := domain.ParseCurrency(walletResponse.Currency)
-	if err != nil {
-		return balanceResult{err: fmt.Errorf("parse wallet balance currency: %v: %w", err, domain.ErrWalletFailure)}
-	}
-
-	return balanceResult{balance: domain.WalletBalance{Amount: amount, Currency: currency}}
-}
-
 func (client *Client) operate(ctx context.Context, path string, name string, operation domain.WalletOperation) (domain.Money, error) {
 	start := time.Now()
 	result := client.sendOperation(ctx, path, operation)
@@ -282,4 +237,83 @@ func describeOutcome(err error) (string, slog.Level) {
 	default:
 		return "unknown", slog.LevelWarn
 	}
+}
+
+// readBalance makes one attempt to read the balance.
+func (client *Client) readBalance(ctx context.Context, userID domain.UserID) balanceResult {
+	ctx, cancel := context.WithTimeout(ctx, client.config.BalanceTimeout)
+	defer cancel()
+
+	request, err := client.newBalanceRequest(ctx, userID)
+	if err != nil {
+		return balanceResult{err: fmt.Errorf("build wallet balance request: %v: %w", err, domain.ErrWalletFailure)}
+	}
+
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return networkFailure(err)
+	}
+	defer response.Body.Close()
+
+	if !isSuccess(response.StatusCode) {
+		return statusFailure(response.StatusCode)
+	}
+	return decodeBalance(response.Body)
+}
+
+// newBalanceRequest builds the authenticated GET for the player's balance.
+func (client *Client) newBalanceRequest(ctx context.Context, userID domain.UserID) (*http.Request, error) {
+	endpointURL := client.config.BaseURL + balancePath + strconv.FormatInt(int64(userID), 10)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	request.Header.Set("x-api-key", client.config.APIKey)
+	return request, nil
+}
+
+// networkFailure classifies a read that got no response. Both cases are
+// retried: running out of time is a timeout (504), anything else a failure (502).
+func networkFailure(err error) balanceResult {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return balanceResult{
+			err:       fmt.Errorf("wallet balance timed out: %v: %w", err, domain.ErrWalletTimeout),
+			retryable: true,
+		}
+	}
+	return balanceResult{
+		err:       fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure),
+		retryable: true,
+	}
+}
+
+// statusFailure classifies a non-2xx answer. Only a 5xx may go away on a
+// second attempt; a 4xx will not.
+func statusFailure(status int) balanceResult {
+	return balanceResult{
+		err:       fmt.Errorf("wallet answered status %d: %w", status, domain.ErrWalletFailure),
+		retryable: status >= http.StatusInternalServerError,
+	}
+}
+
+// decodeBalance reads the balance from a 2xx answer. An invalid body will not
+// improve on a second attempt, so nothing here is retried. %v, not %w: the
+// Money and Currency errors are invalid inputs, which this is not.
+func decodeBalance(body io.Reader) balanceResult {
+	var walletResponse balanceResponse
+	if err := json.NewDecoder(io.LimitReader(body, maxResponseBodySize)).Decode(&walletResponse); err != nil {
+		return balanceResult{err: fmt.Errorf("decode wallet balance response: %v: %w", err, domain.ErrWalletFailure)}
+	}
+
+	amount, err := domain.ParseMoney(walletResponse.Balance.String())
+	if err != nil {
+		return balanceResult{err: fmt.Errorf("parse wallet balance amount: %v: %w", err, domain.ErrWalletFailure)}
+	}
+	currency, err := domain.ParseCurrency(walletResponse.Currency)
+	if err != nil {
+		return balanceResult{err: fmt.Errorf("parse wallet balance currency: %v: %w", err, domain.ErrWalletFailure)}
+	}
+
+	return balanceResult{balance: domain.WalletBalance{Amount: amount, Currency: currency}}
 }
