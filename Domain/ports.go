@@ -11,7 +11,7 @@ type Clock interface {
 	Now() time.Time
 }
 
-// IDGenerator creates the IDs our service assigns to its transactions (UUIDs,
+// IDGenerator creates the IDs our service assigns to its transactions (UUIDs)
 type IDGenerator interface {
 	NewTransactionID() TransactionID
 }
@@ -55,7 +55,7 @@ type WalletOperation struct {
 	Currency  Currency
 	Amount    Money
 	BetID     BetID
-	Reference TransactionID
+	Reference TransactionID // our transaction ID; the Wallet de-duplicates re-sends by it
 }
 
 // WalletBalance is a player's balance as read from the Wallet, which is the
@@ -65,7 +65,22 @@ type WalletBalance struct {
 	Currency Currency
 }
 
-// WalletClient is the Wallet service.
+// WalletClient is the Wallet service. Every implementation must classify each
+// result as follows, because the use cases decide the transaction status from
+// it:
+//
+// Withdraw and Deposit:
+//   - nil                     → applied: the returned Money is the new balance.
+//   - ErrInsufficientFunds    → not applied (the transaction becomes FAILED, 422).
+//   - ErrWalletRejected       → not applied, any other definitive rejection (FAILED, 502).
+//   - ErrWalletOutcomeUnknown → it may or may not have been applied: timeout,
+//     dropped connection, 5xx… The transaction stays PENDING (202). It must
+//     never be reported as not applied.
+//
+// Balance:
+//   - ErrWalletFailure → the balance could not be read (502).
+//   - ErrWalletTimeout → the Wallet did not answer in time (504).
+//
 // Every call is bounded by a timeout.
 type WalletClient interface {
 	Balance(ctx context.Context, userID UserID) (WalletBalance, error)
