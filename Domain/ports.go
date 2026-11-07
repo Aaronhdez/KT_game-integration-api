@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Clock tells the current time. Use cases ask it for "now" and pass that value
 // to the domain (NewPlacedBet, tx.Complete, …), so tests can use a fixed time.
@@ -33,4 +36,14 @@ type IssuedToken struct {
 // the player's wallet user ID and it expires after a configured lifetime.
 type TokenIssuer interface {
 	Issue(userID UserID, now time.Time) (IssuedToken, error)
+}
+
+// PlayerRepository reads the seeded player accounts (§8.1). Both methods
+// return ErrPlayerNotFound when there is no such player.
+//   - FindByUsername is used by login.
+//   - FindByID is used once the player is known from the token, e.g. to check
+//     that a withdraw's currency matches the player's wallet (§8.3).
+type PlayerRepository interface {
+	FindByUsername(ctx context.Context, username string) (Player, error)
+	FindByID(ctx context.Context, userID UserID) (Player, error)
 }
