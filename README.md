@@ -113,8 +113,8 @@ An invalid value stops the service at startup with an error naming the variable.
 | `WALLET_API_KEY` | Wallet `x-api-key` header (**required**; the mock's key is in `.env.example`) | — | Phase 05 |
 | `WALLET_OPERATION_TIMEOUT` | Timeout per withdraw/deposit call to the Wallet | `6s` | Phase 05 |
 | `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` | Phase 05 |
-| `JWT_SECRET` | HMAC secret to sign JWTs | — | Phase 06 |
-| `JWT_TTL` | Token lifetime | `1h` | Phase 06 |
+| `JWT_SECRET` | HMAC-SHA256 key that signs the JWTs (**required**, at least 32 bytes) | — | Phase 06 |
+| `JWT_TTL` | Token lifetime (Go duration) | `1h` | Phase 06 |
 
 Variables of later phases are listed in advance; the service ignores them until
 the phase that reads them is implemented.
