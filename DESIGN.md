@@ -135,6 +135,22 @@ secrets); every other category has a fixed message. Anything unrecognised is
 cause and never shown to the client. Request bodies are limited to 1 MiB, must
 be exactly one JSON object, and unknown fields are ignored.
 
+**Player information (Phase 07).** `GET /player` answers exactly the §8.2 shape
+`{userId, balance, currency}`. The player comes only from the token. The
+balance is read from the Wallet on every request and never cached
+(`Cache-Control: no-store` too), so a Wallet failure is a `502` and a Wallet
+that does not answer in time a `504` — never a zero or stale balance. Our
+database is read first: a token whose player does not exist is a `404` before
+any Wallet call, and if the Wallet reports a currency different from the
+player's account the answer is a `502` (the two systems disagree; no currency
+would make that balance correct). The read takes **no per-player lock**: it
+changes nothing, and locking would make it wait behind a slow withdraw. A read
+during an in-flight operation shows the Wallet's value at that moment, which is
+still the truth. The query does not retry: the client already retries a balance
+read once, so the worst case is about 2 × `WALLET_BALANCE_TIMEOUT` (≈ 20 s), under
+the server's 30 s write timeout. Measured against the mock: answers took 0.5–15 s
+and the Wallet dropped 3 of 11 balance attempts, so the retry matters in practice.
+
 *Future improvements (authentication):* refresh tokens and revocation (today a
 leaked token is valid until it expires — keep `JWT_TTL` short), rate limiting or
 lockout of repeated failed logins, and key rotation (`kid` header with several
