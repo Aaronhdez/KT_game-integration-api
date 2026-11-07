@@ -15,6 +15,7 @@ type Config struct {
 	HTTPPort        int
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
+	DatabaseURL     string // contains the database password: never log it
 }
 
 const (
@@ -25,6 +26,7 @@ const (
 
 // LoadConfig reads the configuration from environment variables,
 // applying defaults for unset values and validating every value.
+// Variables without a default (DATABASE_URL) are required.
 func LoadConfig() (Config, error) {
 	var cfg Config
 
@@ -46,7 +48,22 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.ShutdownTimeout = timeout
 
+	databaseURL, err := requireEnv("DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.DatabaseURL = databaseURL
+
 	return cfg, nil
+}
+
+// requireEnv returns the value of a variable that has no default.
+func requireEnv(key string) (string, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return value, nil
 }
 
 // getEnv returns the value of the variable, or fallback if it is unset or empty.
