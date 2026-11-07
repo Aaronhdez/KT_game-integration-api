@@ -15,7 +15,7 @@ const betColumns = "id, wallet_user_id, currency, stake::text, status, created_a
 
 var _ domain.BetRepository = (*betRepository)(nil)
 
-// BetRepository reads the seeded bets from PostgreSQL.
+// betRepository reads the seeded bets from PostgreSQL.
 type betRepository struct {
 	db querier
 }
