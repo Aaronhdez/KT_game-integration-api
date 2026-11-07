@@ -21,3 +21,16 @@ type IDGenerator interface {
 type PasswordHasher interface {
 	Verify(passwordHash, password string) error
 }
+
+// IssuedToken is a signed access token and the moment it stops being valid.
+// Value is a secret: it must never be logged.
+type IssuedToken struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
+// TokenIssuer creates the signed token returned by login: its subject is
+// the player's wallet user ID and it expires after a configured lifetime.
+type TokenIssuer interface {
+	Issue(userID UserID, now time.Time) (IssuedToken, error)
+}
