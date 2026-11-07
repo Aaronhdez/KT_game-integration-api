@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -62,6 +63,11 @@ func run() error {
 		return err
 	}
 	return shutdownServer(server, cfg.ShutdownTimeout, logger)
+}
+
+func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
+	return slog.New(handler)
 }
 
 func setupLogging(cfg Config) *slog.Logger {
