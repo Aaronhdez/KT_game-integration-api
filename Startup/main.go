@@ -16,9 +16,11 @@ import (
 	actions "github.com/aaronhdez/kt_game-integration-api/Actions"
 	application "github.com/aaronhdez/kt_game-integration-api/Application"
 	persistence "github.com/aaronhdez/kt_game-integration-api/Persistence"
+	queries "github.com/aaronhdez/kt_game-integration-api/Queries"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/clock"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/password"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/token"
+	"github.com/aaronhdez/kt_game-integration-api/Shared/wallet"
 )
 
 const (
@@ -120,11 +122,24 @@ func migrateDatabase(pool *pgxpool.Pool, logger *slog.Logger) error {
 // adapters. This is the only place that knows every concrete type.
 func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
 	players := persistence.NewPlayerRepository(pool)
+	walletClient := wallet.NewClient(wallet.Config{
+		BaseURL:          cfg.WalletBaseURL,
+		APIKey:           cfg.WalletAPIKey,
+		OperationTimeout: cfg.WalletOperationTimeout,
+		BalanceTimeout:   cfg.WalletBalanceTimeout,
+	}, logger)
+	// The same JWT value signs tokens at login and verifies them on every
+	// protected route.
 	tokens := token.NewJWT([]byte(cfg.JWTSecret), cfg.JWTTTL)
-	login := actions.NewLoginCommandHandler(players, password.NewBcrypt(), tokens, clock.System{})
+	systemClock := clock.System{}
+	requireAuth := application.RequireAuth(tokens, systemClock)
+
+	login := actions.NewLoginCommandHandler(players, password.NewBcrypt(), tokens, systemClock)
+	getPlayer := queries.NewGetPlayerQueryHandler(players, walletClient)
 
 	return Handlers{
-		Login: application.NewLoginController(login, logger),
+		Login:  application.NewLoginController(login, logger),
+		Player: requireAuth(application.NewPlayerController(getPlayer, logger)),
 	}
 }
 
