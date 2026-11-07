@@ -619,6 +619,140 @@ func TestBalance_CallerGivesUp_IsNotRetried(t *testing.T) {
 	assertRequestCount(t, requests, 1)
 }
 
+// Each attempt is logged, so a retried read shows up as two lines.
+func TestBalance_LogsOneLinePerAttempt(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, serverError, balanceOf5000USD)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertLogLineCount(t, logs, 2)
+}
+
+func TestBalance_LogsTheCallDetails(t *testing.T) {
+	testCases := []struct {
+		field string
+		want  string
+	}{
+		{field: "msg", want: "wallet call"},
+		{field: "operation", want: "balance"},
+		{field: "user_id", want: "34633089486"},
+		{field: "attempt", want: "1"},
+		{field: "status", want: "200"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.field, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"5000","currency":"USD"}`)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Balance(context.Background(), 34633089486)
+
+			assertLogField(t, logs, testCase.field, testCase.want)
+		})
+	}
+}
+
+func TestBalance_Retry_LogsTheSecondAttempt(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, serverError, balanceOf5000USD)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertNthLogField(t, logs, 1, "attempt", "2")
+}
+
+func TestBalance_LogsTheDuration(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"5000","currency":"USD"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertLogFieldPresent(t, logs, "duration_ms")
+}
+
+func TestBalance_LogsTheOutcomeAndLevel(t *testing.T) {
+	testCases := []struct {
+		name    string
+		status  int
+		body    string
+		outcome string
+		level   string
+	}{
+		{name: "ok", status: http.StatusOK, body: `{"balance":"5000","currency":"USD"}`, outcome: "ok", level: "INFO"},
+		{name: "failure", status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`, outcome: "failure", level: "WARN"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Balance(context.Background(), 34633089486)
+
+			assertLogOutcome(t, logs, testCase.outcome, testCase.level)
+		})
+	}
+}
+
+func TestBalance_Timeout_LogsTimeoutOutcome(t *testing.T) {
+	server := givenASlowWallet(t, 2*time.Second)
+	logs := &bytes.Buffer{}
+	client := newTestClientWithTimeoutLoggingTo(server, 50*time.Millisecond, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertNthLogField(t, logs, 0, "outcome", "timeout")
+}
+
+func TestBalance_FailedRead_LogsTheError(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusUnauthorized, `{"code":"AuthenticatonError"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertLogFieldContains(t, logs, "error", "status 401")
+}
+
+func TestBalance_DroppedConnection_LogsStatusZero(t *testing.T) {
+	server, _ := givenAWalletAnsweringInTurn(t, droppedConnection, balanceOf5000USD)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Balance(context.Background(), 34633089486)
+
+	assertNthLogField(t, logs, 0, "status", "0")
+}
+
+func TestBalance_NeverLogsTheAPIKey(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "ok", status: http.StatusOK, body: `{"balance":"5000","currency":"USD"}`},
+		{name: "wrong api key", status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Balance(context.Background(), 34633089486)
+
+			assertLogsDoNotContain(t, logs, testAPIKey)
+		})
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // walletAnswer is one scripted answer of the fake Wallet: a status and body,
@@ -768,13 +902,18 @@ func newTestClient(server *httptest.Server) *Client {
 
 // newTestClientWithTimeout is newTestClient with both Wallet timeouts set to timeout.
 func newTestClientWithTimeout(server *httptest.Server, timeout time.Duration) *Client {
+	return buildTestClient(server, timeout, slog.New(slog.DiscardHandler))
+}
+
+// buildTestClient is the common part of every newTestClient… helper.
+func buildTestClient(server *httptest.Server, timeout time.Duration, logger *slog.Logger) *Client {
 	config := Config{
 		BaseURL:          server.URL,
 		APIKey:           testAPIKey,
 		OperationTimeout: timeout,
 		BalanceTimeout:   timeout,
 	}
-	return NewClient(config, slog.New(slog.DiscardHandler))
+	return NewClient(config, logger)
 }
 
 func givenAWithdraw(t *testing.T) domain.WalletOperation {
@@ -867,13 +1006,12 @@ func assertBalance(t *testing.T, result domain.Money, err error, want string) {
 
 // newTestClientLoggingTo is newTestClient writing its logs as JSON lines into logs.
 func newTestClientLoggingTo(server *httptest.Server, logs *bytes.Buffer) *Client {
-	config := Config{
-		BaseURL:          server.URL,
-		APIKey:           testAPIKey,
-		OperationTimeout: testTimeout,
-		BalanceTimeout:   testTimeout,
-	}
-	return NewClient(config, slog.New(slog.NewJSONHandler(logs, nil)))
+	return newTestClientWithTimeoutLoggingTo(server, testTimeout, logs)
+}
+
+// newTestClientWithTimeoutLoggingTo combines newTestClientWithTimeout and newTestClientLoggingTo.
+func newTestClientWithTimeoutLoggingTo(server *httptest.Server, timeout time.Duration, logs *bytes.Buffer) *Client {
+	return buildTestClient(server, timeout, slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
 // readLogLines decodes every JSON log line. Numbers are kept as json.Number so
@@ -919,6 +1057,19 @@ func assertLogField(t *testing.T, logs *bytes.Buffer, field, want string) {
 	}
 	if result := fmt.Sprint(value); result != want {
 		t.Errorf("expected log field %s = %q, got %q", field, want, result)
+	}
+}
+
+// assertNthLogField checks a field of the log line at index (0 = first line),
+// for calls that write several lines.
+func assertNthLogField(t *testing.T, logs *bytes.Buffer, index int, field, want string) {
+	t.Helper()
+	lines := readLogLines(t, logs)
+	if index >= len(lines) {
+		t.Fatalf("expected at least %d log lines, got %d:\n%s", index+1, len(lines), logs.String())
+	}
+	if result := fmt.Sprint(lines[index][field]); result != want {
+		t.Errorf("expected log line %d field %s = %q, got %q", index, field, want, result)
 	}
 }
 

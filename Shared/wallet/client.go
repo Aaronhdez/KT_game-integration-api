@@ -36,6 +36,7 @@ type balanceResult struct {
 	balance   domain.WalletBalance
 	err       error
 	retryable bool // a second attempt could succeed
+	status    int  // 0 when no response was received
 }
 
 // Client represents a client for interacting with the wallet service.
@@ -70,7 +71,9 @@ func (client *Client) Deposit(ctx context.Context, operation domain.WalletOperat
 // It will retry once if the first attempt fails due to a retryable error.
 func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
 	for attempt := 1; ; attempt++ {
+		start := time.Now()
 		result := client.readBalance(ctx, userID)
+		logBalanceRead(client.logger, userID, attempt, result, time.Since(start))
 		if result.err == nil || !result.retryable || attempt == balanceAttempts {
 			return result.balance, result.err
 		}
@@ -258,7 +261,9 @@ func (client *Client) readBalance(ctx context.Context, userID domain.UserID) bal
 	if !isSuccess(response.StatusCode) {
 		return statusFailure(response.StatusCode)
 	}
-	return decodeBalance(response.Body)
+	result := decodeBalance(response.Body)
+	result.status = response.StatusCode
+	return result
 }
 
 // newBalanceRequest builds the authenticated GET for the player's balance.
@@ -294,6 +299,7 @@ func statusFailure(status int) balanceResult {
 	return balanceResult{
 		err:       fmt.Errorf("wallet answered status %d: %w", status, domain.ErrWalletFailure),
 		retryable: status >= http.StatusInternalServerError,
+		status:    status,
 	}
 }
 
@@ -316,4 +322,36 @@ func decodeBalance(body io.Reader) balanceResult {
 	}
 
 	return balanceResult{balance: domain.WalletBalance{Amount: amount, Currency: currency}}
+}
+
+// logBalanceRead writes one line per balance attempt. It never logs the API key,
+// the request headers or the bodies.
+func logBalanceRead(logger *slog.Logger, userID domain.UserID, attempt int, result balanceResult, duration time.Duration) {
+	outcome, level := describeBalanceOutcome(result.err)
+	attrs := []any{
+		"operation", "balance",
+		"user_id", int64(userID),
+		"attempt", attempt,
+		"status", result.status,
+		"outcome", outcome,
+		"duration_ms", duration.Milliseconds(),
+	}
+	if result.err != nil {
+		attrs = append(attrs, "error", result.err.Error())
+	}
+	logger.Log(context.Background(), level, "wallet call", attrs...)
+}
+
+// describeBalanceOutcome names the result of a balance attempt for the logs.
+// A failed read is a warning: the Wallet is unreliable by design and the
+// player gets a 502/504 they can retry.
+func describeBalanceOutcome(err error) (string, slog.Level) {
+	switch {
+	case err == nil:
+		return "ok", slog.LevelInfo
+	case errors.Is(err, domain.ErrWalletTimeout):
+		return "timeout", slog.LevelWarn
+	default:
+		return "failure", slog.LevelWarn
+	}
 }
