@@ -24,6 +24,15 @@ const (
 	balanceRetryPause   = 200 * time.Millisecond
 )
 
+// Config holds the configuration for the wallet client, including the base URL, API key, and timeouts for operations and balance checks.
+// APIKey is secret, and therefore, is never logged
+type Config struct {
+	BaseURL          string
+	APIKey           string
+	OperationTimeout time.Duration
+	BalanceTimeout   time.Duration
+}
+
 type operationResult struct {
 	balance             domain.Money
 	err                 error
