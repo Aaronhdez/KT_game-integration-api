@@ -68,6 +68,24 @@ func (r *BetRepository) NextID(ctx context.Context) (domain.BetID, error) {
 	return domain.BetID(id), nil
 }
 
+func (r *BetRepository) Update(ctx context.Context, bet domain.Bet) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE bets SET status = $1, updated_at = $2
+		WHERE id = $3 AND wallet_user_id = $4`,
+		string(bet.Status),
+		bet.UpdatedAt,
+		int64(bet.ID),
+		int64(bet.UserID),
+	)
+	if err != nil {
+		return fmt.Errorf("update bet %d: %w", bet.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrBetNotFound
+	}
+	return nil
+}
+
 func scanBet(row pgx.Row) (domain.Bet, error) {
 	var (
 		id           int64

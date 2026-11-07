@@ -99,7 +99,87 @@ func TestBetRepository_NextID_AfterBetsWereInserted_ReturnsAnUnusedID(t *testing
 	assertBetIDGreaterThan(t, result, err, existing.ID)
 }
 
+func TestBetRepository_Update_SettledBet_StoresStatusAndUpdatedAt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	bet := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, bet)
+	settleBet(t, &bet, "25.00")
+
+	err := repository.Update(testContext(t), bet)
+
+	assertStoredBet(t, pool, err, bet)
+}
+
+func TestBetRepository_Update_ChangedStake_IsNotStored(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	original := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, original)
+	changed := original
+	changed.Stake = parseMoney(t, "99.99")
+
+	err := repository.Update(testContext(t), changed)
+
+	assertStoredBet(t, pool, err, original)
+}
+
+func TestBetRepository_Update_UnknownBet_ReturnsBetNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	neverInserted := newTestBet(t, pool, eurPlayerID, "10.50")
+
+	err := repository.Update(testContext(t), neverInserted)
+
+	assertErrorIs(t, err, domain.ErrBetNotFound)
+}
+
+func TestBetRepository_Update_AnotherPlayersBet_ReturnsBetNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	bet := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, bet)
+	asAnotherPlayer := bet
+	asAnotherPlayer.UserID = usdPlayerID
+
+	err := repository.Update(testContext(t), asAnotherPlayer)
+
+	assertErrorIs(t, err, domain.ErrBetNotFound)
+}
+
+func TestBetRepository_Update_AnotherPlayersBet_LeavesTheBetUnchanged(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := NewBetRepository(pool)
+	original := newTestBet(t, pool, eurPlayerID, "10.50")
+	insertBetRow(t, pool, original)
+	asAnotherPlayer := original
+	asAnotherPlayer.UserID = usdPlayerID
+	settleBet(t, &asAnotherPlayer, "25.00")
+
+	_ = repository.Update(testContext(t), asAnotherPlayer)
+
+	assertStoredBet(t, pool, nil, original)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
+
+// settleBet settles the bet in memory, one second after its creation, as a
+// use case would before calling Update.
+func settleBet(t *testing.T, bet *domain.Bet, amount string) {
+	t.Helper()
+	if err := bet.Settle(parseMoney(t, amount), bet.CreatedAt.Add(time.Second)); err != nil {
+		t.Fatalf("settle bet %d: %v", bet.ID, err)
+	}
+}
+
+func parseMoney(t *testing.T, value string) domain.Money {
+	t.Helper()
+	amount, err := domain.ParseMoney(value)
+	if err != nil {
+		t.Fatalf("parse money %q: %v", value, err)
+	}
+	return amount
+}
 
 // reserveBetID calls the repository's NextID as setup, failing the test on error.
 func reserveBetID(t *testing.T, repository *BetRepository) domain.BetID {
