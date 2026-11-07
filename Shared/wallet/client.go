@@ -16,6 +16,7 @@ import (
 
 const (
 	withdrawPath        = "/api/v1/withdraw"
+	depositPath         = "/api/v1/deposit"
 	maxResponseBodySize = 1 << 20
 )
 
@@ -39,6 +40,12 @@ func NewClient(config Config, logger *slog.Logger) *Client {
 // Its result is classified as domain.Money, and any error indicates the outcome of the operation.
 func (client *Client) Withdraw(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
 	return client.operate(ctx, withdrawPath, "withdraw", operation)
+}
+
+// Deposit adds money to the player's wallet. Its result is classified as
+// domain.WalletClient describes.
+func (client *Client) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
+	return client.operate(ctx, depositPath, "deposit", operation)
 }
 
 func (client *Client) operate(ctx context.Context, path string, name string, operation domain.WalletOperation) (domain.Money, error) {

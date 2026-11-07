@@ -385,6 +385,36 @@ func TestWithdraw_NeverLogsTheAPIKey(t *testing.T) {
 	}
 }
 
+// Deposit shares every step with Withdraw (request, classification, timeout,
+// logging), so its tests only cover what differs: the endpoint and the name.
+func TestDeposit_PostsToTheDepositEndpoint(t *testing.T) {
+	server, sent := givenAWalletRecordingRequests(t)
+	client := newTestClient(server)
+
+	_, err := client.Deposit(context.Background(), givenADeposit(t))
+
+	assertEndpoint(t, sent, err, http.MethodPost, "/api/v1/deposit")
+}
+
+func TestDeposit_Success_ReturnsTheNewBalance(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"5014.75","transactions":[{"id":2,"reference":"tx-2"}]}`)
+	client := newTestClient(server)
+
+	result, err := client.Deposit(context.Background(), givenADeposit(t))
+
+	assertBalance(t, result, err, "5014.75")
+}
+
+func TestDeposit_LogsTheOperationName(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"5014.75"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Deposit(context.Background(), givenADeposit(t))
+
+	assertLogField(t, logs, "operation", "deposit")
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // givenAWalletDroppingConnections starts a fake Wallet that closes every
@@ -484,6 +514,17 @@ func givenAWithdraw(t *testing.T) domain.WalletOperation {
 		Amount:    givenAParsedMoney(t, "10.50"),
 		BetID:     1001,
 		Reference: "8f14e45f-ceea-4f6a-9b1e-0c7a3e2b1d55",
+	}
+}
+
+func givenADeposit(t *testing.T) domain.WalletOperation {
+	t.Helper()
+	return domain.WalletOperation{
+		UserID:    34633089486,
+		Currency:  domain.USD,
+		Amount:    givenAParsedMoney(t, "25.25"),
+		BetID:     1001,
+		Reference: "c9f0f895-fb98-4b91-8d6e-2f1a7c3b4e60",
 	}
 }
 
