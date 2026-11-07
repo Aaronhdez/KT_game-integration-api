@@ -1,5 +1,4 @@
 -- +goose Up
--- TODO (developer): tables, sequence, checks and indexes. See the instructions in the chat.
 CREATE TABLE players (
     wallet_user_id BIGINT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -33,7 +32,10 @@ CREATE TABLE transactions (
     old_balance NUMERIC(20,2) NOT NULL,
     new_balance NUMERIC(20,2) NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (amount >= 0),
+    CHECK (type <> 'WITHDRAW' OR amount > 0),
+    CHECK ((type = 'CANCEL') = (cancelled_transaction_id IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX transactions_idempotency_key ON transactions (wallet_user_id, provider_transaction_id) WHERE type IN ('WITHDRAW', 'DEPOSIT');
@@ -41,7 +43,6 @@ CREATE UNIQUE INDEX transactions_active_settlement ON transactions (bet_id) WHER
 CREATE UNIQUE INDEX transactions_single_cancel ON transactions (cancelled_transaction_id) WHERE type = 'CANCEL';
 
 -- +goose Down
--- TODO (developer): drop everything created above, in reverse order.
 DROP INDEX IF EXISTS transactions_single_cancel;
 DROP INDEX IF EXISTS transactions_active_settlement;
 DROP INDEX IF EXISTS transactions_idempotency_key;
