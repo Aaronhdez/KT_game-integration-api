@@ -7,9 +7,9 @@
 
 | Situation | Behaviour | Why |
 |---|---|---|
-| Wallet returns an error **before** applying the operation | *TBD (05, 08)* | |
+| Wallet returns an error **before** applying the operation | Only a *definitive* rejection counts as "not applied": `400 InsufficientBalance` → `FAILED`, `422 INSUFFICIENT_FUNDS`; any other `400` or a `401` → `FAILED`, `502 WALLET_ERROR`, logged at `error` (it means a bug on our side or a wrong `WALLET_API_KEY`). The client classifies by HTTP status **and** body `code`; anything it does not recognise is *unknown*, never `FAILED`. *Use-case side: 08.* | Insufficient funds and validation errors are both `400`; only `code` tells them apart (findings Q3–Q5). A wrong `FAILED` cannot be undone, a `PENDING` can be resolved. |
 | Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. It is resolved by re-sending the identical request: `409 DuplicatedTransaction` means it had been applied. *Details: 05, 08, 11.* | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
-| Wallet times out | *TBD (05, 08)* | |
+| Wallet times out | **Operations:** each call is bounded by `WALLET_OPERATION_TIMEOUT` (6 s). No answer in time is *unknown* → `PENDING`, `202`. The client never re-sends an operation by itself. **Balance reads:** `WALLET_BALANCE_TIMEOUT` (10 s) per attempt, one retry after 200 ms on a timeout, a network error or a `5xx`; the read then fails with `504 WALLET_TIMEOUT` or `502 WALLET_ERROR`. Worst case ≈ 20 s, still bounded. *Use-case side: 07, 08.* | The Wallet never answers a POST after ~5 s but a balance read can take ~15 s (findings Q7); one shared 3 s timeout would have turned a third of successful operations into `PENDING`. A read is safe to repeat; an operation re-sent immediately could race the original (Q8), so re-sending is left to the resolution of Phase 11. |
 | Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. *Resolution: 08, 11.* | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
 | Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, so a retry sees the first request's transaction (replay or `409`). The unique index `(wallet_user_id, provider_transaction_id)` is the safety net if two requests ever race past it (e.g. two API instances). *Replay rules: 08.* | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
 | Wallet restarts and loses its state | Not detected. After a restart the Wallet is back at its seeded balances and has forgotten which requests it applied, so re-sending a `PENDING` request would apply it again. Accepted risk. *Mitigations, if any: 11.* | The Wallet keeps everything in memory and has no endpoint to query past transactions (findings Q1, Q10). In this setup it only restarts on purpose, and the documented reset (`docker compose down -v`) also wipes our database. |
@@ -95,6 +95,21 @@ provider ID can never collide with, or reveal, another player's transaction.
 Go/SQL boundary as text (`Money.String()` in, `amount::text` out, then
 `ParseMoney`): exact in both directions, and every value read is validated
 again by the domain.
+
+**Wallet client (Phase 05).** `Shared/wallet` implements `domain.WalletClient`
+with the standard library only. Each operation sends exactly one transaction,
+with our transaction ID as `reference` (and as `X-TRACE-ID`, to correlate logs)
+and the amount as a JSON number with two decimals. Any `2xx` is success. A `2xx`
+whose body or balance cannot be read, and a `409 DuplicatedTransaction`, mean
+*applied, new balance unknown* (`ErrWalletAppliedBalanceUnknown`): the
+transaction completes, it never fails. A balance read with an empty or unknown
+currency (what the Wallet answers for an unknown user) or an invalid amount is a
+`502`, never a zero balance. Money and currency errors coming from the Wallet are
+wrapped with `%v`, so they can never be mistaken for an invalid request (`400`).
+Every call (every attempt, for balance reads) writes one log line with the
+operation, user, bet, reference, attempt, Wallet status and code, outcome and
+duration; the API key, headers and bodies are never logged (tested). The client
+is wired into `Startup` with its first consumer, `GET /player` (Phase 07).
 
 **Missing `amount` in a deposit (to handle in Phase 09).** If the field is absent,
 JSON decoding leaves the amount at zero without calling our decoder — which for a
