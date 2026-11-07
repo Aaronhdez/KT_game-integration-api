@@ -241,7 +241,10 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
    which the developer asked to write too — developer writes
    3, 6, 7, 8, 9; Claude writes 2, 4, 5, 10, 12.
 2. ~~**Upper bound for amounts**~~ **Resolved:** 18 integer digits.
-3. **Wallet balance with more than 2 decimals** — cannot happen through our API
+3. ~~**Wallet balance with more than 2 decimals**~~ **Resolved in Phase 05:** a
+   balance read with 3 decimals → `ErrWalletFailure`; an applied operation whose
+   balance has 3 decimals → `ErrWalletAppliedBalanceUnknown` (completed, never
+   `FAILED`). Original note: cannot happen through our API
    (we validate every amount and always send 2 decimals; seeded balances have
    ≤ 2), only if someone operates on the Wallet directly. `Money` stays strict.
    How the Wallet client handles it is decided in Phase 05, with one constraint
@@ -251,8 +254,10 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
    decimals.
 4. ~~**Who generates `BetID`**~~ **Resolved:** a PostgreSQL sequence (Phase 04);
    `IDGenerator` only generates `TransactionID` (UUID).
-5. **New balance after a `409 DuplicatedTransaction`** — accepted as a Phase 05
-   decision; the `WalletClient` signature may change slightly then.
+5. ~~**New balance after a `409 DuplicatedTransaction`**~~ **Resolved in Phase
+   05:** the signature stays `(Money, error)`; a `409` returns the new sentinel
+   `ErrWalletAppliedBalanceUnknown` (applied, balance unknown). How such a
+   transaction is completed is decided in Phases 08/11.
 
 ## As built — deviations from this plan
 

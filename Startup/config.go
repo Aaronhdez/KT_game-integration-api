@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,17 +17,28 @@ type Config struct {
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	DatabaseURL     string // contains the database password: never log it
+
+	WalletBaseURL          string        // absolute http(s) URL, without trailing slash
+	WalletAPIKey           string        // secret: never log it
+	WalletOperationTimeout time.Duration // per withdraw/deposit call
+	WalletBalanceTimeout   time.Duration // per balance read attempt
 }
 
 const (
 	defaultHTTPPort        = "8080"
 	defaultLogLevel        = "info"
 	defaultShutdownTimeout = "10s"
+
+	defaultWalletBaseURL = "http://wallet:8000"
+	// The Wallet never answers a withdraw/deposit after ~5 s, but a balance
+	// read can take up to ~15 s (docs/wallet-findings.md, Q7).
+	defaultWalletOperationTimeout = "6s"
+	defaultWalletBalanceTimeout   = "10s"
 )
 
 // LoadConfig reads the configuration from environment variables,
 // applying defaults for unset values and validating every value.
-// Variables without a default (DATABASE_URL) are required.
+// Variables without a default (DATABASE_URL, WALLET_API_KEY) are required.
 func LoadConfig() (Config, error) {
 	var cfg Config
 
@@ -54,7 +66,47 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.DatabaseURL = databaseURL
 
+	walletBaseURL, err := parseBaseURL(getEnv("WALLET_BASE_URL", defaultWalletBaseURL))
+	if err != nil {
+		return Config{}, fmt.Errorf("WALLET_BASE_URL: %w", err)
+	}
+	cfg.WalletBaseURL = walletBaseURL
+
+	walletAPIKey, err := requireEnv("WALLET_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WalletAPIKey = walletAPIKey
+
+	operationTimeout, err := parsePositiveDuration(getEnv("WALLET_OPERATION_TIMEOUT", defaultWalletOperationTimeout))
+	if err != nil {
+		return Config{}, fmt.Errorf("WALLET_OPERATION_TIMEOUT: %w", err)
+	}
+	cfg.WalletOperationTimeout = operationTimeout
+
+	balanceTimeout, err := parsePositiveDuration(getEnv("WALLET_BALANCE_TIMEOUT", defaultWalletBalanceTimeout))
+	if err != nil {
+		return Config{}, fmt.Errorf("WALLET_BALANCE_TIMEOUT: %w", err)
+	}
+	cfg.WalletBalanceTimeout = balanceTimeout
+
 	return cfg, nil
+}
+
+// parseBaseURL accepts an absolute http or https URL and removes any trailing
+// slash, so paths can be appended as baseURL + "/api/v1/...".
+func parseBaseURL(value string) (string, error) {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a valid URL", value)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%q must start with http:// or https://", value)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("%q has no host", value)
+	}
+	return strings.TrimRight(value, "/"), nil
 }
 
 // requireEnv returns the value of a variable that has no default.

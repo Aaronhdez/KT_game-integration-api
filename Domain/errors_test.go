@@ -60,6 +60,10 @@ func TestWalletOutcomeUnknown_IsNotAnErrorCategory(t *testing.T) {
 	assertErrorIsNoCategory(t, ErrWalletOutcomeUnknown)
 }
 
+func TestWalletAppliedBalanceUnknown_IsNotAnErrorCategory(t *testing.T) {
+	assertErrorIsNoCategory(t, ErrWalletAppliedBalanceUnknown)
+}
+
 func TestAlreadyCancelled_IsNotAnErrorCategory(t *testing.T) {
 	assertErrorIsNoCategory(t, ErrAlreadyCancelled)
 }

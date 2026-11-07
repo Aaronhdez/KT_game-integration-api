@@ -65,6 +65,9 @@ func setupLogging(cfg Config) *slog.Logger {
 		"http_port", cfg.HTTPPort,
 		"log_level", cfg.LogLevel.String(),
 		"shutdown_timeout", cfg.ShutdownTimeout.String(),
+		"wallet_base_url", cfg.WalletBaseURL,
+		"wallet_operation_timeout", cfg.WalletOperationTimeout.String(),
+		"wallet_balance_timeout", cfg.WalletBalanceTimeout.String(),
 	)
 	logger.Debug("debug logging enabled")
 	return logger
