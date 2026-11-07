@@ -77,7 +77,7 @@ POST /api/v1/auth/login {username, password}
     200 {token, expiresAt} + Cache-Control: no-store
 ```
 
-### Ports sketch (`Domain/ports.go`, additions)
+### Ports sketch (`Domain/ports_auth.go`, additions)
 
 ```go
 // TokenVerifier checks a token produced by TokenIssuer and returns its subject.
@@ -118,7 +118,7 @@ fixed message. Decided in open question 3.
 | File | Content |
 |---|---|
 | `go.mod`, `go.sum` | `golang-jwt/jwt/v5`, `golang.org/x/crypto`. |
-| `Domain/ports.go` | `TokenVerifier`. |
+| `Domain/ports.go` → `ports_auth.go`, `ports_persistence.go`, `ports_wallet.go`, `ports_system.go` | Split by topic (no declaration changed); `TokenVerifier` in `ports_auth.go`. |
 | `Domain/errors.go`, `errors_test.go` | `ErrMissingCredentials`, `ErrInvalidToken` (+ category tests). |
 | `Startup/config.go`, `config_test.go` | `JWTSecret []byte`, `JWTTTL time.Duration`. |
 | `Startup/main.go` | Startup log adds `jwt_ttl` (never the secret); wiring of pool → repo, hasher, JWT, clock, login action, handler. |
