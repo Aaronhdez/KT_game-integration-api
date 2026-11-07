@@ -83,7 +83,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | 01 | `01-wallet-spike.md` | Run the mock Wallet, read Swagger, **discover its failure modes** empirically (errors before/after applying, timeouts, duplicate `reference`/`betId` behaviour, decimal format). Record findings in `docs/wallet-findings.md`. No production code. | — |
 | 02 | `02-bootstrap.md` | `go.mod`, `Startup/` (main, config from env, slog, DI wiring, router, `/health`, graceful shutdown), `.env.example`. *(Makefile/Taskfile dropped: `make`/`task` not installed; commands documented in README/AGENTS.)* | — |
 | 03 | `03-domain.md` | `Domain/`: `Money`, `Currency`, IDs, `Transaction`, `Bet`, statuses and state transitions, domain errors, Cancel decision rules, **ports** (`PlayerRepository`, `WalletClient`, `Clock`, `IDGenerator`, `PasswordHasher`, `TokenIssuer`). Unit tests. *(Bet/transaction repositories and locking moved to Phase 04.)* | 02 |
-| 04 | `04-persistence.md` | PostgreSQL schema + migrations, seed of the 4 players (bcrypt hashes), repositories in `Persistence/`, unit-of-work / tx helper, locking primitive. Integration tests (optional, testcontainers). | 03 |
+| 04 | `04-persistence.md` | PostgreSQL schema + migrations, seed of the 4 players (bcrypt hashes), repositories in `Persistence/`, unit-of-work / tx helper, locking primitive. Integration tests. *(Built with pgx + goose; integration tests use a local PostgreSQL via `TEST_DATABASE_URL`, no testcontainers; in-memory fakes deferred to their first consumer, Phases 06/08.)* | 03 |
 | 05 | `05-wallet-client.md` | HTTP Wallet client in `Shared/wallet`: timeouts, `x-api-key`, error mapping to *applied / not applied / unknown*, logging. Fake wallet in `Domain/domaintest` for tests. | 01, 03 |
 | 06 | `06-authentication.md` | `POST /api/v1/auth/login`, JWT issue/verify, auth middleware, identical error for unknown user / wrong password. | 04 |
 | 07 | `07-player-endpoint.md` | `GET /api/v1/player` (Query): live balance from Wallet, 502/504 on failure, never cached. | 05, 06 |
@@ -91,7 +91,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | 09 | `09-deposit-endpoint.md` | `POST /api/v1/deposit`: link to withdraw, WON/LOST, single active settlement, zero-amount decision. | 08 |
 | 10 | `10-cancel-endpoint.md` | `POST /api/v1/cancel`: every row of the table in section 8.5 via compensating transactions. | 09 |
 | 11 | `11-pending-resolution.md` | Resolution on retry and/or background reconciler; FAILED-retry policy. | 08–10 |
-| 12 | `12-dockerization.md` | `Dockerfile`, `docker-compose.yml` (api + postgres + `kentechsp/wallet-client`), healthchecks, reset instructions (`docker compose down -v`). | 02, 04 |
+| 12 | `12-dockerization.md` | `Dockerfile`, `docker-compose.yml` (api + postgres + `kentechsp/wallet-client`), healthchecks, reset instructions (`docker compose down -v`). Consider letting the compose `postgres` service also serve the integration tests (separate `gameapi_test` database). | 02, 04 |
 | 13 | `13-docs-and-delivery.md` | Final `README.md`, `DESIGN.md` (all 5 required sections), OpenAPI spec, CI pipeline, last review. | all |
 | 14 | `14-nice-to-haves.md` *(optional)* | Cancel-before-withdraw, extra hardening, whatever time allows. | all |
 
@@ -177,7 +177,9 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
    new attempt? (Decide in Phase 11; the assessment asks to document it.)
 4. While a request is `PENDING` and the same key arrives again: re-try the
    resolution, or just return 202? (Phase 11.)
-5. Usernames/passwords for the 4 seeded players (Phase 04).
+5. ~~Usernames/passwords for the 4 seeded players (Phase 04).~~ **Resolved in
+   Phase 04:** `player_usd`, `player_eur`, `player_kes`, `player_usd_2`, each
+   with its own password, documented in `README.md`.
 
 ## 8. Prerequisites on the developer machine
 

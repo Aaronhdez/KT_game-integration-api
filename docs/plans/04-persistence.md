@@ -283,6 +283,27 @@ green; Claude proposes the commit message.
    database created by an init script), replacing the `docker run` command in
    `README.md`; decided in `12-dockerization.md`.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Developer writes 4 (SQL), 6–8; Claude the rest | Developer wrote the schema SQL and the repository code of 6–8 step by step; Claude wrote, on request, the code of 8a, completed 6, `scanBet`, 8b, and **all the tests of 6–9** | The developer chose to focus on production code and review the tests. |
+| `00001_schema.sql` + `00002_seed_players.sql` | `00001_create_players`, `00002_create_bets`, `00003_create_transactions`, `00004_seed_players` | Developer's choice: one table per migration, easier to read. Done before any database depended on it. |
+| Test database in a second container on port 5433 | Database `gameapi_test` in the same `gameapi-db` container (`createdb`) | One container is enough; the README documents both commands. |
+| `querier` in `db.go` | `Persistence/querier.go` | Developer's choice. |
+| `PlayerRepository` built from a `querier` | Exported `PlayerRepository` + `NewPlayerRepository(*pgxpool.Pool)`; bet and transaction repositories unexported with `new…Repository(querier)` | Only the player repository is built by `Startup`; the other two are only created by the unit of work, on its database transaction. |
+| Test helpers emptying `transactions`/`bets` between tests | No cleanup: every test uses fresh IDs (`bet_id_seq`, `gen_random_uuid()`) and provider IDs derived from them | Simpler, and tests cannot collide even with rows of earlier runs. |
+| Repositories tested through each other | Each method's test prepares and checks rows with **plain SQL** helpers (`insertBetRow`/`readBetRow`, `insertTransactionRow`/`readTransactionRow`) | A failing test points at the method under test only. Helpers are ordered by first use in the tests (project convention). |
+| — | Lock tests use goroutines + channels (`holdLock`, `runWithLock`), verified 5× in a row and with a deliberately broken lock (two tests fail) | Concurrency tests must not be flaky and must actually detect a missing lock. |
+| — | Mutation check of the bcrypt hashes deferred | Verified against the documented passwords when generated; a login test in Phase 06 checks them end to end. |
+| Alternatives to the advisory lock | Reviewed again during step 9 (in-process mutex, transaction lock, lease column, `FOR UPDATE`, optimistic) — advisory lock kept | Recorded in `DESIGN.md` §5. |
+
+Dependencies added: `github.com/jackc/pgx/v5 v5.12.0`, `github.com/pressly/goose/v3 v3.29.0`.
+
+Step 10 (review pass) was done partially: blocks A (withdraw flow) and C (the
+lock) answered and corrected in the chat; block B (which mechanism stops each
+duplicate) pending.
+
 ## Definition of done
 
 - `Domain/` still imports only the standard library and `shopspring/decimal`;
