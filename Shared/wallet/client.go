@@ -55,8 +55,13 @@ func (client *Client) sendOperation(ctx context.Context, path string, operation 
 	}
 	defer response.Body.Close()
 
+	status := response.StatusCode
 	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, maxResponseBodySize))
-	return decodeSuccess(responseBody)
+	if status >= http.StatusOK && status < http.StatusMultipleChoices {
+		return decodeSuccess(responseBody)
+	}
+
+	return responseAsError(responseBody, status)
 }
 
 // decodeSuccess reads the new balance from a 2xx response.
@@ -65,6 +70,15 @@ func decodeSuccess(body []byte) operationResult {
 	_ = json.Unmarshal(body, &walletResponse)                        // TODO phase 4: unusable body
 	balance, _ := domain.ParseMoney(walletResponse.Balance.String()) // TODO phase 4: unusable balance
 	return operationResult{balance: balance}
+}
+
+// responseAsError classifies a non-2xx answer by its status and the Wallet's
+// error code. Without a readable error body the code stays "" and only the
+// status counts.
+func responseAsError(responseBody []byte, status int) operationResult {
+	var errorBody errorResponse
+	_ = json.Unmarshal(responseBody, &errorBody)
+	return operationResult{err: classifyOperation(status, errorBody.Code)}
 }
 
 type operationResult struct {

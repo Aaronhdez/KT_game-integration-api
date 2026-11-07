@@ -52,6 +52,89 @@ func TestWithdraw_Success_ReturnsTheNewBalance(t *testing.T) {
 	}
 }
 
+func TestWithdraw_InsufficientBalance_IsInsufficientFunds(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusBadRequest, `{"msg":"Insufficient balance for the user.","code":"InsufficientBalance"}`)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertErrorIs(t, err, domain.ErrInsufficientFunds)
+}
+
+func TestWithdraw_DuplicatedTransaction_IsAppliedWithUnknownBalance(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusConflict, `{"msg":"Transaction already exists.","code":"DuplicatedTransaction"}`)
+	client := newTestClient(server)
+
+	_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertErrorIs(t, err, domain.ErrWalletAppliedBalanceUnknown)
+}
+
+func TestWithdraw_Rejection_IsRejected(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "400 invalid request",
+			status: http.StatusBadRequest,
+			body:   `{"msg":"Invalid request.","code":"InvalidRequest"}`,
+		},
+		{
+			name:   "401 wrong api key",
+			status: http.StatusUnauthorized,
+			body:   `{"msg":"Authentication error, see logs for more details.","code":"AuthenticatonError"}`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertErrorIs(t, err, domain.ErrWalletRejected)
+		})
+	}
+}
+
+func TestWithdraw_ServerError_IsUnknown(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "500 error after applying",
+			status: http.StatusInternalServerError,
+			body:   `{"msg":"Internal server response.","code":"666"}`,
+		},
+		{
+			name:   "500 without body",
+			status: http.StatusInternalServerError,
+			body:   ``,
+		},
+		{
+			name:   "503 with a non JSON body",
+			status: http.StatusServiceUnavailable,
+			body:   `Service Unavailable`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			client := newTestClient(server)
+
+			_, err := client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertErrorIs(t, err, domain.ErrWalletOutcomeUnknown)
+		})
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // givenAWalletAnswering starts a fake Wallet that answers every request with
