@@ -15,6 +15,8 @@ const transactionColumns = `id::text, type, status, wallet_user_id, bet_id,
 	provider_transaction_id, cancelled_transaction_id::text, amount::text, currency,
 	old_balance::text, new_balance::text, created_at, updated_at`
 
+var _ domain.TransactionRepository = (*transactionRepository)(nil)
+
 // transactionRepository stores transactions in PostgreSQL. Its unique indexes
 // enforce idempotency, a single active settlement per bet and a single cancel
 // per transaction.
