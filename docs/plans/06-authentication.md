@@ -289,6 +289,26 @@ For every step: `gofmt -l .` empty, `go vet ./...`, `go build ./...`,
 4. ~~**Exact login response fields.**~~ **Resolved:** `{"token", "expiresAt"}`
    as recorded in Phase 03 from §8.1.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Developer writes the production code of 4, 5, 7–10; Claude the rest | As planned. Claude wrote every test first and checked it against a throw-away reference implementation outside the repo, then reviewed the developer's code until green | Each piece of production code was demanded by a failing test. |
+| `Config.JWTSecret []byte` | `string`; converted with `[]byte(cfg.JWTSecret)` in the wiring | A struct with a slice field is not comparable with `==`, which the config tests rely on. `len()` still counts bytes. |
+| `TokenVerifier` in `Domain/ports.go` | `Domain/ports.go` split by topic into `ports_auth.go`, `ports_persistence.go`, `ports_wallet.go`, `ports_system.go` | The file was growing; same package, so no caller changed. The developer asked whether ports should move to `Shared` instead: no — a port belongs to its consumer, or `Application`/`Actions` would import `Shared`. |
+| `domaintest.FakeTokenIssuer` | `domaintest.FakeTokens`, both `TokenIssuer` and `TokenVerifier` | The middleware tests need a verifier, and `Application` must not import `Shared/token` even in tests; one fake lets a test issue a token and then verify it. |
+| `actions.Login`, `NewLogin` | `actions.LoginCommandHandler`, `NewLoginCommandHandler` | The developer's choice (MediatR analogy); convention recorded in `ARCHITECTURE.md`. |
+| `application.LoginHandler` | `application.LoginController` (implements `http.Handler`) | Avoids two different "handlers" in two layers. |
+| Login use case in a subpackage? | Rejected: `Actions/` stays one package, one file per use case | Withdraw/deposit/cancel will share unexported helpers; Go favours one package with several files. |
+| Errors split between `Domain` and `Actions`? | Kept in `Domain`; question recorded as open question 6 of `00-general-plan.md`, to revisit after Phase 10 | Only one error (`ErrMissingCredentials`) could move today. |
+| Trailing data detected with `json.Decoder.More()` | A second `Decode` into `struct{}` that must return `io.EOF` | `More()` misses some cases (e.g. a stray `}` after the object). |
+| `Shared/token` test list | Added: issued `ExpiresAt` is truncated to whole seconds | The `exp` claim has no fractions; without truncating, the reported expiry could be up to 1 s later than the real one (a test catches it). |
+| Token never logged — tested in the middleware | Not tested there: `RequireAuth` has no logger; the request logger already logs only the path (tested in Phase 02) and the login controller only logs `500`s (tested: no password in that log) | Nothing in the auth path writes headers or bodies to the log. |
+| Manual `curl` check | Done against the local PostgreSQL: 200 with token (`sub` = `"34633089486"`), identical 401 bodies, 400s, 404 on `GET`; ≈ 55 ms for both unknown user and wrong password; nothing secret in the log | — |
+
+New dependencies: `golang.org/x/crypto` (bcrypt) and `github.com/golang-jwt/jwt/v5`,
+both already chosen in the master plan.
+
 ## Follow-ups after this phase
 
 To do once step 12 is committed, as one commit
