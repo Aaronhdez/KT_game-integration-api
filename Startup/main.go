@@ -68,6 +68,7 @@ func setupLogging(cfg Config) *slog.Logger {
 		"wallet_base_url", cfg.WalletBaseURL,
 		"wallet_operation_timeout", cfg.WalletOperationTimeout.String(),
 		"wallet_balance_timeout", cfg.WalletBalanceTimeout.String(),
+		"jwt_ttl", cfg.JWTTTL.String(),
 	)
 	logger.Debug("debug logging enabled")
 	return logger
