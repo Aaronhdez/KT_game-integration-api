@@ -15,7 +15,7 @@ const (
 
 func classifyOperation(status int, code string) error {
 	switch {
-	case status >= http.StatusOK && status < http.StatusMultipleChoices:
+	case isSuccess(status):
 		return nil
 	case status == http.StatusConflict && code == duplicatedTransaction:
 		return fmt.Errorf("wallet answered status %d, code %q: %w", status, code, domain.ErrWalletAppliedBalanceUnknown)
@@ -26,4 +26,10 @@ func classifyOperation(status int, code string) error {
 	default:
 		return fmt.Errorf("wallet answered status %d, code %q: %w", status, code, domain.ErrWalletOutcomeUnknown)
 	}
+}
+
+// isSuccess reports whether status is 2xx. The mock answers 200 and swagger
+// documents 201, so any 2xx means the operation was applied.
+func isSuccess(status int) bool {
+	return status >= http.StatusOK && status < http.StatusMultipleChoices
 }
