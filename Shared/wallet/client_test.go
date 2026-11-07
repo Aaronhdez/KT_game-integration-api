@@ -1,12 +1,16 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -249,6 +253,138 @@ func TestWithdraw_DroppedConnection_IsNotRetried(t *testing.T) {
 	assertRequestCount(t, requests, 1)
 }
 
+func TestWithdraw_LogsOneLinePerCall(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"4989.5"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertLogLineCount(t, logs, 1)
+}
+
+func TestWithdraw_LogsTheCallDetails(t *testing.T) {
+	testCases := []struct {
+		field string
+		want  string
+	}{
+		{field: "msg", want: "wallet call"},
+		{field: "operation", want: "withdraw"},
+		{field: "user_id", want: "34633089486"},
+		{field: "bet_id", want: "1001"},
+		{field: "reference", want: "8f14e45f-ceea-4f6a-9b1e-0c7a3e2b1d55"},
+		{field: "status", want: "200"},
+		{field: "wallet_transaction_id", want: "7"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.field, func(t *testing.T) {
+			server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"4989.5","transactions":[{"id":7,"reference":"tx-1"}]}`)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertLogField(t, logs, testCase.field, testCase.want)
+		})
+	}
+}
+
+func TestWithdraw_LogsTheDuration(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusOK, `{"balance":"4989.5"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertLogFieldPresent(t, logs, "duration_ms")
+}
+
+func TestWithdraw_LogsTheWalletCode(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusBadRequest, `{"msg":"Insufficient balance for the user.","code":"InsufficientBalance"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertLogField(t, logs, "wallet_code", "InsufficientBalance")
+}
+
+// The outcome tells at a glance what the use case will do; the level makes
+// unknown outcomes (warn) and our own mistakes (error) stand out.
+func TestWithdraw_LogsTheOutcomeAndLevel(t *testing.T) {
+	testCases := []struct {
+		name    string
+		status  int
+		body    string
+		outcome string
+		level   string
+	}{
+		{name: "applied", status: http.StatusOK, body: `{"balance":"4989.5"}`, outcome: "applied", level: "INFO"},
+		{name: "applied with unknown balance", status: http.StatusConflict, body: `{"code":"DuplicatedTransaction"}`, outcome: "applied_balance_unknown", level: "WARN"},
+		{name: "insufficient funds", status: http.StatusBadRequest, body: `{"code":"InsufficientBalance"}`, outcome: "insufficient_funds", level: "INFO"},
+		{name: "rejected", status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`, outcome: "rejected", level: "ERROR"},
+		{name: "unknown", status: http.StatusInternalServerError, body: `{"code":"666"}`, outcome: "unknown", level: "WARN"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertLogOutcome(t, logs, testCase.outcome, testCase.level)
+		})
+	}
+}
+
+func TestWithdraw_FailedCall_LogsTheError(t *testing.T) {
+	server := givenAWalletAnswering(t, http.StatusInternalServerError, `{"code":"666"}`)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertLogFieldContains(t, logs, "error", `code "666"`)
+}
+
+func TestWithdraw_DroppedConnection_LogsStatusZero(t *testing.T) {
+	server, _ := givenAWalletDroppingConnections(t)
+	logs := &bytes.Buffer{}
+	client := newTestClientLoggingTo(server, logs)
+
+	client.Withdraw(context.Background(), givenAWithdraw(t))
+
+	assertLogField(t, logs, "status", "0")
+}
+
+// The API key is a secret (AGENTS.md): it must never reach the logs, also
+// when the Wallet rejects it.
+func TestWithdraw_NeverLogsTheAPIKey(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "applied", status: http.StatusOK, body: `{"balance":"4989.5"}`},
+		{name: "wrong api key", status: http.StatusUnauthorized, body: `{"code":"AuthenticatonError"}`},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := givenAWalletAnswering(t, testCase.status, testCase.body)
+			logs := &bytes.Buffer{}
+			client := newTestClientLoggingTo(server, logs)
+
+			client.Withdraw(context.Background(), givenAWithdraw(t))
+
+			assertLogsDoNotContain(t, logs, testAPIKey)
+		})
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // givenAWalletDroppingConnections starts a fake Wallet that closes every
@@ -404,5 +540,93 @@ func assertBalance(t *testing.T, result domain.Money, err error, want string) {
 	assertNoError(t, err)
 	if !result.Equal(givenAParsedMoney(t, want)) {
 		t.Errorf("expected balance %s, got %s", want, result)
+	}
+}
+
+// newTestClientLoggingTo is newTestClient writing its logs as JSON lines into logs.
+func newTestClientLoggingTo(server *httptest.Server, logs *bytes.Buffer) *Client {
+	config := Config{
+		BaseURL:          server.URL,
+		APIKey:           testAPIKey,
+		OperationTimeout: testTimeout,
+		BalanceTimeout:   testTimeout,
+	}
+	return NewClient(config, slog.New(slog.NewJSONHandler(logs, nil)))
+}
+
+// readLogLines decodes every JSON log line. Numbers are kept as json.Number so
+// that large IDs are compared exactly.
+func readLogLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	decoder.UseNumber()
+	for decoder.More() {
+		var line map[string]any
+		if err := decoder.Decode(&line); err != nil {
+			t.Fatalf("invalid log line: %v\n%s", err, logs.String())
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// readTheOnlyLogLine returns the single log line written by the call.
+func readTheOnlyLogLine(t *testing.T, logs *bytes.Buffer) map[string]any {
+	t.Helper()
+	lines := readLogLines(t, logs)
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 log line, got %d:\n%s", len(lines), logs.String())
+	}
+	return lines[0]
+}
+
+func assertLogLineCount(t *testing.T, logs *bytes.Buffer, want int) {
+	t.Helper()
+	if result := len(readLogLines(t, logs)); result != want {
+		t.Errorf("expected %d log line(s), got %d:\n%s", want, result, logs.String())
+	}
+}
+
+func assertLogField(t *testing.T, logs *bytes.Buffer, field, want string) {
+	t.Helper()
+	line := readTheOnlyLogLine(t, logs)
+	value, found := line[field]
+	if !found {
+		t.Fatalf("expected log field %q, got %v", field, line)
+	}
+	if result := fmt.Sprint(value); result != want {
+		t.Errorf("expected log field %s = %q, got %q", field, want, result)
+	}
+}
+
+func assertLogFieldPresent(t *testing.T, logs *bytes.Buffer, field string) {
+	t.Helper()
+	line := readTheOnlyLogLine(t, logs)
+	if _, found := line[field]; !found {
+		t.Errorf("expected log field %q, got %v", field, line)
+	}
+}
+
+func assertLogFieldContains(t *testing.T, logs *bytes.Buffer, field, text string) {
+	t.Helper()
+	line := readTheOnlyLogLine(t, logs)
+	if result := fmt.Sprint(line[field]); !strings.Contains(result, text) {
+		t.Errorf("expected log field %s to contain %q, got %q", field, text, result)
+	}
+}
+
+func assertLogOutcome(t *testing.T, logs *bytes.Buffer, outcome, level string) {
+	t.Helper()
+	line := readTheOnlyLogLine(t, logs)
+	if line["outcome"] != outcome || line["level"] != level {
+		t.Errorf("expected outcome %q at level %s, got outcome %v at level %v", outcome, level, line["outcome"], line["level"])
+	}
+}
+
+func assertLogsDoNotContain(t *testing.T, logs *bytes.Buffer, secret string) {
+	t.Helper()
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("logs contain a secret:\n%s", logs.String())
 	}
 }
