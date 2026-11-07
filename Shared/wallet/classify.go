@@ -1,3 +1,4 @@
+// Package wallet is the HTTP client of the Wallet service.
 package wallet
 
 import (
