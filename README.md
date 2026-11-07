@@ -33,12 +33,25 @@ Services: API on `http://localhost:8080`, mock Wallet on `http://localhost:8000`
 
 ## Running locally (without Docker)
 
-Needs Go (64-bit). Every variable has a default, so no setup is required:
+Needs Go (64-bit) and a PostgreSQL 16 database. Start one with Docker:
 
 ```bash
-go run ./Startup
+docker run --rm -d --name gameapi-db -p 5432:5432 \
+  -e POSTGRES_USER=gameapi -e POSTGRES_PASSWORD=gameapi -e POSTGRES_DB=gameapi \
+  postgres:16-alpine
+```
+
+`DATABASE_URL` is the only required variable; every other one has a default:
+
+```bash
+DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable" go run ./Startup
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
+
+In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`
+then `go run ./Startup`. If the database cannot be reached within 10 seconds the
+service exits with code 1. Stop the container with `docker stop gameapi-db`
+(`--rm` deletes it, and its data, when it stops).
 
 On Windows PowerShell use `curl.exe` (plain `curl` is an alias of
 `Invoke-WebRequest`). Stop the service with Ctrl+C: it finishes in-flight
@@ -68,7 +81,7 @@ An invalid value stops the service at startup with an error naming the variable.
 | `HTTP_PORT` | API listen port (1–65535) | `8080` | Phase 02 |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (case-insensitive) | `info` | Phase 02 |
 | `SHUTDOWN_TIMEOUT` | Max time to finish in-flight requests on shutdown (Go duration: `500ms`, `10s`, `1m`) | `10s` | Phase 02 |
-| `DATABASE_URL` | PostgreSQL connection string | — | Phase 04 |
+| `DATABASE_URL` | PostgreSQL connection string (**required**). Pool options such as `pool_max_conns=10` can be added as URL parameters | — | Phase 04 |
 | `WALLET_BASE_URL` | Wallet base URL | `http://wallet:8000` | Phase 05 |
 | `WALLET_API_KEY` | Wallet `x-api-key` header | — | Phase 05 |
 | `WALLET_TIMEOUT` | Timeout per Wallet call | `3s` | Phase 05 |
