@@ -66,9 +66,31 @@ The program does not read `.env` itself; Docker Compose does (Phase 12).
 ```bash
 gofmt -l .                        # must print nothing
 go vet ./...
+go vet -tags=integration ./...    # also checks the integration test files
 go test ./...                     # unit tests, no Docker needed
-go test -tags=integration ./...   # needs PostgreSQL (from Phase 04)
 ```
+
+### Integration tests (PostgreSQL)
+
+Files named `*_integration_test.go` carry the build tag `integration`: they only
+compile with `-tags=integration`, so `go test ./...` never needs a database.
+They run against the database in `TEST_DATABASE_URL`; without it they fail
+instead of being skipped. With the container from "Running locally", create a
+separate test database once:
+
+```bash
+docker exec gameapi-db createdb -U gameapi gameapi_test
+TEST_DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi_test?sslmode=disable" \
+  go test -count=1 -tags=integration ./Persistence/...
+```
+
+In PowerShell set `$env:TEST_DATABASE_URL=...` first. The tests migrate the
+database themselves, drop and recreate its schema in one test, and create rows
+with fresh IDs, so the test database must not be the one the service uses.
+`-count=1` disables Go's test result cache.
+
+To make VS Code (gopls) analyse these files, add
+`"gopls": { "buildFlags": ["-tags=integration"] }` to your user settings.
 
 ## Configuration
 
