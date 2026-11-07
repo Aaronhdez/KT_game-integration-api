@@ -85,6 +85,9 @@ func (client *Client) Balance(ctx context.Context, userID domain.UserID) (domain
 
 // readBalance makes one attempt to read the balance.
 func (client *Client) readBalance(ctx context.Context, userID domain.UserID) balanceResult {
+	ctx, cancel := context.WithTimeout(ctx, client.config.BalanceTimeout)
+	defer cancel()
+
 	endpointURL := client.config.BaseURL + balancePath + strconv.FormatInt(int64(userID), 10)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
@@ -94,10 +97,10 @@ func (client *Client) readBalance(ctx context.Context, userID domain.UserID) bal
 
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return balanceResult{
-			err:       fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure),
-			retryable: true,
+		if errors.Is(err, context.DeadlineExceeded) {
+			return balanceResult{err: fmt.Errorf("wallet balance timed out: %v: %w", err, domain.ErrWalletTimeout), retryable: true}
 		}
+		return balanceResult{err: fmt.Errorf("send wallet balance request: %v: %w", err, domain.ErrWalletFailure), retryable: true}
 	}
 	defer response.Body.Close()
 

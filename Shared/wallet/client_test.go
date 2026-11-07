@@ -575,14 +575,60 @@ func TestBalance_KeepsFailing_StopsAfterTwoAttempts(t *testing.T) {
 	assertRequestCount(t, requests, 2)
 }
 
+// The balance read has its own timeout (findings Q7: up to ~15 s), and running
+// out of it is a timeout (504), not a generic Wallet failure (502).
+func TestBalance_SlowerThanTimeoutTwice_IsWalletTimeout(t *testing.T) {
+	server := givenASlowWallet(t, 2*time.Second)
+	client := newTestClientWithTimeout(server, 50*time.Millisecond)
+
+	_, err := client.Balance(context.Background(), 34633089486)
+
+	assertErrorIs(t, err, domain.ErrWalletTimeout)
+}
+
+func TestBalance_SlowerThanTimeoutTwice_IsNotWalletFailure(t *testing.T) {
+	server := givenASlowWallet(t, 2*time.Second)
+	client := newTestClientWithTimeout(server, 50*time.Millisecond)
+
+	_, err := client.Balance(context.Background(), 34633089486)
+
+	assertErrorIsNot(t, err, domain.ErrWalletFailure)
+}
+
+// Each attempt has its own timeout: if the first one were not cut, its late
+// answer (a different balance) would be returned instead of the second one.
+func TestBalance_SlowThenFast_ReturnsTheSecondAnswer(t *testing.T) {
+	lateBalance := walletAnswer{status: http.StatusOK, body: `{"balance":"1.00","currency":"USD"}`, delay: 2 * time.Second}
+	server, _ := givenAWalletAnsweringInTurn(t, lateBalance, balanceOf5000USD)
+	client := newTestClientWithTimeout(server, 50*time.Millisecond)
+
+	result, err := client.Balance(context.Background(), 34633089486)
+
+	assertWalletBalance(t, result, err, "5000.00", domain.USD)
+}
+
+// When the caller gives up (e.g. the HTTP request of GET /player is cancelled),
+// there is nobody left to answer, so there is no second attempt.
+func TestBalance_CallerGivesUp_IsNotRetried(t *testing.T) {
+	server, requests := givenAWalletAnsweringInTurn(t, walletAnswer{status: http.StatusOK, body: `{"balance":"5000","currency":"USD"}`, delay: 2 * time.Second})
+	client := newTestClient(server)
+	ctx := givenACallerGivingUpAfter(t, 50*time.Millisecond)
+
+	client.Balance(ctx, 34633089486)
+
+	assertRequestCount(t, requests, 1)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // walletAnswer is one scripted answer of the fake Wallet: a status and body,
-// or a connection closed without any response.
+// or a connection closed without any response. With a delay, the answer is
+// sent late, unless the client gives up first.
 type walletAnswer struct {
 	status int
 	body   string
 	drop   bool
+	delay  time.Duration
 }
 
 var (
@@ -600,6 +646,9 @@ func givenAWalletAnsweringInTurn(t *testing.T, answers ...walletAnswer) (*httpte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		turn := int(requests.Add(1)) - 1
 		answer := answers[min(turn, len(answers)-1)]
+		if !waitOrGiveUp(r, answer.delay) {
+			return
+		}
 		if answer.drop {
 			dropConnection(t, w)
 			return
@@ -610,6 +659,28 @@ func givenAWalletAnsweringInTurn(t *testing.T, answers ...walletAnswer) (*httpte
 	}))
 	t.Cleanup(server.Close)
 	return server, requests
+}
+
+// waitOrGiveUp waits for delay and reports true, or reports false as soon as
+// the client gives up. The body is read first: only then does the server
+// notice that the client has gone away.
+func waitOrGiveUp(r *http.Request, delay time.Duration) bool {
+	io.Copy(io.Discard, r.Body)
+	select {
+	case <-time.After(delay):
+		return true
+	case <-r.Context().Done():
+		return false
+	}
+}
+
+// givenACallerGivingUpAfter returns a context that is cancelled after timeout,
+// as when the client of our own API goes away.
+func givenACallerGivingUpAfter(t *testing.T, timeout time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 // dropConnection closes the connection without sending a response.
