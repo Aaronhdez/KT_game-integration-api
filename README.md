@@ -21,44 +21,85 @@ Wallet service.
 
 ## Quick start
 
-*TBD (Phase 12).* Target:
-
 ```bash
-cp .env.example .env
+cp .env.example .env        # PowerShell: Copy-Item .env.example .env
+# edit .env: set JWT_SECRET to a random value of at least 32 bytes
+#            (e.g. the output of `openssl rand -hex 32`)
 docker compose up --build
 ```
 
-Services: API on `http://localhost:8080`, mock Wallet on `http://localhost:8000`
-(Swagger at `/swagger/index.html`), PostgreSQL on `localhost:5432`.
-
-## Running locally (without Docker)
-
-Needs Go (64-bit) and a PostgreSQL 16 database. Start one with Docker:
+The API starts once PostgreSQL and the Wallet report healthy (the first build
+takes a minute or two). Then:
 
 ```bash
-docker run --rm -d --name gameapi-db -p 5432:5432 \
-  -e POSTGRES_USER=gameapi -e POSTGRES_PASSWORD=gameapi -e POSTGRES_DB=gameapi \
-  postgres:16-alpine
+curl http://localhost:8080/health      # {"status":"ok"}
+```
+
+| Service | URL (localhost only) | Notes |
+|---|---|---|
+| `api` | `http://localhost:8080` | This service. Migrations and seed run at startup |
+| `wallet` | `http://localhost:8000` | Mock Wallet; Swagger at `/swagger/index.html` |
+| `postgres` | `localhost:5432` | PostgreSQL 16; databases `gameapi` (the service) and `gameapi_test` (integration tests) |
+
+Useful commands:
+
+```bash
+docker compose up --build -d --wait   # start in the background, return when healthy
+docker compose ps                     # status and health of each service
+docker compose logs -f api            # API logs (JSON, one line per event)
+docker compose restart api            # restart only the API (keeps the database and the Wallet's state)
+docker compose down -v                # stop and reset everything (see "Resetting the state")
+```
+
+Under Compose, `DATABASE_URL` and `WALLET_BASE_URL` are set in
+`docker-compose.yml` so they always point at the other containers; the values
+in `.env` are only for running the service outside Docker. Everything else is
+read from `.env`.
+
+### Troubleshooting
+
+- **Port already in use** (`8080`, `8000` or `5432`): stop whatever uses it
+  (e.g. a local PostgreSQL or an older `gameapi-db` container) and run
+  `docker compose up` again.
+- **Platform warning for `wallet`** (`linux/arm64` … `linux/amd64`): expected.
+  The Wallet image is only built for arm64 and Docker emulates it on other
+  hosts; it works, just a bit slower.
+- **The API cannot connect after changing `POSTGRES_PASSWORD`**: PostgreSQL
+  reads it only when its volume is first created. Run `docker compose down -v`
+  (deletes the data) and start again.
+- **Use only letters, digits, `-` and `_` in `POSTGRES_PASSWORD`**: it is put
+  into `DATABASE_URL` without URL-encoding.
+
+## Running locally (without Docker for the API)
+
+Needs Go (64-bit). Start only PostgreSQL and the Wallet with Compose (needs the
+`.env` of the Quick start):
+
+```bash
+docker compose up -d --wait postgres wallet
 ```
 
 `DATABASE_URL`, `WALLET_API_KEY` and `JWT_SECRET` are the only required
-variables; every other one has a default:
+variables; every other one has a default. The program does not read `.env`
+itself, so set them in the shell (the values match `.env.example`):
 
 ```bash
-export DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"
+export DATABASE_URL="postgres://gameapi:change-me@localhost:5432/gameapi?sslmode=disable"
+export WALLET_BASE_URL="http://localhost:8000"
 export WALLET_API_KEY="<the key in .env.example>"
 export JWT_SECRET="any-local-secret-of-at-least-32-bytes"
 go run ./Startup
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
 
-In PowerShell: `$env:DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi?sslmode=disable"`,
+In PowerShell: `$env:DATABASE_URL="postgres://gameapi:change-me@localhost:5432/gameapi?sslmode=disable"`,
+`$env:WALLET_BASE_URL="http://localhost:8000"`,
 `$env:WALLET_API_KEY="<the key in .env.example>"` and
 `$env:JWT_SECRET="any-local-secret-of-at-least-32-bytes"`, then `go run ./Startup`.
-To reach a Wallet started on your machine also set
-`WALLET_BASE_URL=http://localhost:8000` (the default is the Docker Compose host name). If the database cannot be reached within 10 seconds the
-service exits with code 1. Stop the container with `docker stop gameapi-db`
-(`--rm` deletes it, and its data, when it stops).
+Use the password of your `.env` if you changed it. `WALLET_BASE_URL` is needed
+because its default is the Docker Compose host name (`http://wallet:8000`).
+If the database cannot be reached within 10 seconds the service exits with
+code 1.
 
 On Windows PowerShell use `curl.exe` (plain `curl` is an alias of
 `Invoke-WebRequest`). Stop the service with Ctrl+C: it finishes in-flight
@@ -66,7 +107,6 @@ requests (up to `SHUTDOWN_TIMEOUT`) and exits with code 0.
 
 To override a setting, set the variable in the shell before running, e.g.
 `$env:HTTP_PORT="9090"` (PowerShell) or `HTTP_PORT=9090 go run ./Startup` (bash).
-The program does not read `.env` itself; Docker Compose does (Phase 12).
 
 ## Running the tests
 
@@ -82,12 +122,12 @@ go test ./...                     # unit tests, no Docker needed
 Files named `*_integration_test.go` carry the build tag `integration`: they only
 compile with `-tags=integration`, so `go test ./...` never needs a database.
 They run against the database in `TEST_DATABASE_URL`; without it they fail
-instead of being skipped. With the container from "Running locally", create a
-separate test database once:
+instead of being skipped. The compose `postgres` service creates the test
+database `gameapi_test` on its first start (script in `docker/postgres/init/`):
 
 ```bash
-docker exec gameapi-db createdb -U gameapi gameapi_test
-TEST_DATABASE_URL="postgres://gameapi:gameapi@localhost:5432/gameapi_test?sslmode=disable" \
+docker compose up -d --wait postgres
+TEST_DATABASE_URL="postgres://gameapi:change-me@localhost:5432/gameapi_test?sslmode=disable" \
   go test -count=1 -tags=integration ./Persistence/...
 ```
 
@@ -312,11 +352,17 @@ in [`DESIGN.md`](DESIGN.md) §2.
 
 ## Resetting the state
 
-The Wallet is in-memory and resets to its initial balances on restart, while our
-database persists. To reset both:
+The Wallet is in-memory and resets to its initial balances whenever its
+container stops, while our database persists in the `pgdata` volume. To reset
+both:
 
 ```bash
-docker compose down -v
+docker compose down -v      # removes the containers and the pgdata volume
+docker compose up -d --wait # fresh database (migrations + seed) and fresh Wallet
 ```
 
-*Confirmed in Phase 12.*
+Always reset both together: resetting only one of them leaves our records and
+the Wallet's balances out of step (see `DESIGN.md` §1, "Wallet restarts and
+loses its state"). For the same reason, `docker compose stop`, `restart` or
+`down` **without** `-v` are not a clean state: they keep our database but
+reset the Wallet. To restart only the API, use `docker compose restart api`.

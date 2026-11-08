@@ -151,6 +151,38 @@ No new automated tests (no Go code changes). Manual check, recorded in
    **Resolved:** no — for an assessment run, a crash should be visible, not
    hidden by a restart loop.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| API healthcheck every 5 s | `interval: 30s`, `start_interval: 2s`, `start_period: 20s` | Every check is a logged `request completed` line: every 5 s flooded the logs. `start_interval` (Docker Engine ≥ 25) keeps the startup detection fast |
+| — | README: `docker compose stop`/`restart`/`down` without `-v` are **not** a clean state; restart only the API with `docker compose restart api` | Stopping the `wallet` container wipes its memory (findings Q10) while `pgdata` keeps our rows. Also noted in `DESIGN.md` §1 and `AGENTS.md` |
+| — | README troubleshooting: port in use, arm64 warning, `POSTGRES_PASSWORD` only read on an empty volume | Found while setting up the developer's machine (the old `gameapi-db` container held port 5432) |
+| `.env.example` `DATABASE_URL` comment | `DATABASE_URL` and `WALLET_BASE_URL` now point at `localhost` | They are only used outside Compose (`go run`); Compose overrides both |
+
+**Manual check (2026-11-08, Docker Engine 29.6.1 on Windows, amd64).**
+
+1. `docker compose down -v` + `up --build` → the three services `healthy`;
+   migrations `[1..6]` applied; `gameapi_test` created; image 30.5 MB, user
+   `uid=10001`, no `.env` inside.
+2. `player_usd`: `GET /player` 5000.00 → withdraw 1.00 `201` → deposit 2.00
+   `201 WON` → cancel of the deposit `201` (bet back to `PLACED`) →
+   `GET /player` 4999.00.
+3. `docker compose restart api` → the same withdraw replays `200` with the same
+   `transactionId`.
+5. A withdraw in flight during `docker compose stop api`: the request finished
+   after `SIGTERM` (`202` after 8.1 s, Wallet `500`), then `http server stopped`,
+   container `Exited (0)` — the graceful stop Phase 11 could not check on Windows.
+6. That `202` left the withdraw `PENDING`; after `docker compose up -d` the
+   resolver re-sent it 2.4 s after startup, the Wallet answered `409` (applied)
+   → `COMPLETED`.
+8. `docker compose logs`: no JWT secret, API key, database password, token
+   (`eyJ…`) or player password.
+4. `docker compose down -v` + `up` → balance back to 5000.00 and the same
+   `providerTransactionId` is a new transaction (new `transactionId`) → reset
+   confirmed.
+7. Integration tests green against `gameapi_test` of the compose `postgres`.
+
 ## Definition of done
 
 - `cp .env.example .env` (with a real `JWT_SECRET`) + `docker compose up --build`
@@ -162,6 +194,6 @@ No new automated tests (no Go code changes). Manual check, recorded in
 - Integration tests run against the compose `postgres` (`gameapi_test`).
 - `gofmt -l .` empty, `go vet ./...` clean, `go build ./...`, `go test ./...`
   green.
-- Manual check done (Test plan 1–8) and recorded under "As built".
+- Manual check done (Test plan 1–8) and recorded under "As built". ✔
 - `README.md`, `AGENTS.md`, `DESIGN.md`, `.env.example`, `00-general-plan.md`
   updated.

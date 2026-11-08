@@ -122,10 +122,16 @@ go test ./...
 go run ./Startup                    # needs DATABASE_URL, WALLET_API_KEY and JWT_SECRET (see README); serves on :8080; GET /health
 go list -f '{{.GoFiles}}' ./...     # check no test helpers leaked into production files
 
+# Docker (needs .env, copied from .env.example)
+docker compose up --build -d --wait # api + postgres + wallet, returns when all are healthy
+docker compose up -d --wait postgres wallet   # only the dependencies, for go run / integration tests
+docker compose down -v              # reset: deletes our database and the Wallet's in-memory state
+
 # Integration tests (need PostgreSQL and TEST_DATABASE_URL; see README)
 go vet -tags=integration ./...
 go test -count=1 -tags=integration ./Persistence/...
 ```
 
-> Not available yet: `docker compose up --build` / `docker compose down -v` (Phase 12).
+> Stopping or restarting the `wallet` container resets its balances while our
+> database keeps its rows: reset both together with `docker compose down -v`.
 > There is no Makefile: `make` is not installed on the developer's Windows machine.
