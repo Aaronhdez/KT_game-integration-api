@@ -35,6 +35,8 @@ type BetRepository interface {
 //   - FindByProviderTransactionID only looks at WITHDRAW and DEPOSIT
 //     transactions: a CANCEL carries the provider ID of the one it cancels.
 //   - FindCancelOf returns the CANCEL of the given transaction.
+//   - FindActiveDeposit returns the PENDING or COMPLETED deposit of the bet
+//     (at most one: the active-settlement unique index).
 //   - Update writes the status, NewBalance and UpdatedAt; the other fields
 //     never change.
 type TransactionRepository interface {
@@ -42,6 +44,7 @@ type TransactionRepository interface {
 	FindByID(ctx context.Context, userID UserID, id TransactionID) (Transaction, error)
 	FindByProviderTransactionID(ctx context.Context, userID UserID, id ProviderTransactionID) (Transaction, error)
 	FindCancelOf(ctx context.Context, userID UserID, originalID TransactionID) (Transaction, error)
+	FindActiveDeposit(ctx context.Context, userID UserID, betID BetID) (Transaction, error)
 	Update(ctx context.Context, tx Transaction) error
 }
 

@@ -104,6 +104,24 @@ func (r *transactionRepository) FindCancelOf(ctx context.Context, userID domain.
 	return tx, nil
 }
 
+func (r *transactionRepository) FindActiveDeposit(ctx context.Context, userID domain.UserID, betID domain.BetID) (domain.Transaction, error) {
+	query := "SELECT " + transactionColumns + ` FROM transactions
+		WHERE wallet_user_id = $1
+		AND bet_id = $2
+		AND type = 'DEPOSIT'
+		AND status IN ('PENDING', 'COMPLETED')`
+
+	tx, err := scanTransaction(r.db.QueryRow(ctx, query, int64(userID), int64(betID)))
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Transaction{}, domain.ErrTransactionNotFound
+	}
+	if err != nil {
+		return domain.Transaction{}, fmt.Errorf("find active deposit of bet: %w", err)
+	}
+	return tx, nil
+}
+
 func (r *transactionRepository) Update(ctx context.Context, tx domain.Transaction) error {
 	tag, err := r.db.Exec(ctx, `
 		UPDATE transactions SET status = $1, new_balance = $2, updated_at = $3

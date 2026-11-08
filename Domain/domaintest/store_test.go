@@ -172,6 +172,54 @@ func TestFakeStoreTransactions_FindCancelOf_TransactionWithoutCancel_ReturnsTran
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
+func TestFakeStoreTransactions_FindActiveDeposit_PendingDeposit_ReturnsIt(t *testing.T) {
+	store := NewFakeStore()
+	deposit := givenAPendingDeposit(t, 2, testUserID, "prov-2", 1)
+	store.PutTransaction(deposit)
+
+	result, err := findActiveDeposit(store, testUserID, 1)
+
+	assertTransactionID(t, result, err, deposit.ID)
+}
+
+func TestFakeStoreTransactions_FindActiveDeposit_CompletedDeposit_ReturnsIt(t *testing.T) {
+	store := NewFakeStore()
+	deposit := givenACompletedDeposit(t, 2, testUserID, "prov-2", 1)
+	store.PutTransaction(deposit)
+
+	result, err := findActiveDeposit(store, testUserID, 1)
+
+	assertTransactionID(t, result, err, deposit.ID)
+}
+
+func TestFakeStoreTransactions_FindActiveDeposit_OnlyInactiveDeposits_ReturnsTransactionNotFound(t *testing.T) {
+	store := NewFakeStore()
+	store.PutTransaction(givenAFailedDeposit(t, 2, testUserID, "prov-2", 1))
+	store.PutTransaction(givenACancelledDeposit(t, 3, testUserID, "prov-3", 1))
+
+	_, err := findActiveDeposit(store, testUserID, 1)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestFakeStoreTransactions_FindActiveDeposit_AnotherPlayersBet_ReturnsTransactionNotFound(t *testing.T) {
+	store := NewFakeStore()
+	store.PutTransaction(givenAPendingDeposit(t, 2, testUserID, "prov-2", 1))
+
+	_, err := findActiveDeposit(store, anotherUserID, 1)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestFakeStoreTransactions_FindActiveDeposit_OnlyTheWithdrawOfTheBet_ReturnsTransactionNotFound(t *testing.T) {
+	store := NewFakeStore()
+	store.PutTransaction(givenACompletedWithdraw(t, 1, testUserID, "prov-1"))
+
+	_, err := findActiveDeposit(store, testUserID, 1)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
 // Transactions: Update
 
 func TestFakeStoreTransactions_Update_StoresOnlyStatusNewBalanceAndUpdatedAt(t *testing.T) {
@@ -342,6 +390,32 @@ func givenAPendingDeposit(t *testing.T, n int, userID domain.UserID, providerID 
 	return tx
 }
 
+func givenACompletedDeposit(t *testing.T, n int, userID domain.UserID, providerID string, betID domain.BetID) domain.Transaction {
+	t.Helper()
+	tx := givenAPendingDeposit(t, n, userID, providerID, betID)
+	newBalance := givenAParsedMoney(t, "5010.50")
+	tx.Status = domain.TransactionCompleted
+	tx.NewBalance = &newBalance
+	tx.UpdatedAt = testNow.Add(time.Second)
+	return tx
+}
+
+func givenAFailedDeposit(t *testing.T, n int, userID domain.UserID, providerID string, betID domain.BetID) domain.Transaction {
+	t.Helper()
+	tx := givenAPendingDeposit(t, n, userID, providerID, betID)
+	tx.Status = domain.TransactionFailed
+	tx.UpdatedAt = testNow.Add(time.Second)
+	return tx
+}
+
+func givenACancelledDeposit(t *testing.T, n int, userID domain.UserID, providerID string, betID domain.BetID) domain.Transaction {
+	t.Helper()
+	tx := givenACompletedDeposit(t, n, userID, providerID, betID)
+	tx.Status = domain.TransactionCancelled
+	tx.UpdatedAt = testNow.Add(2 * time.Second)
+	return tx
+}
+
 func givenACancelOf(t *testing.T, n int, original domain.Transaction) domain.Transaction {
 	t.Helper()
 	return domain.NewCancel(FakeTransactionID(n), original, givenAParsedMoney(t, "4989.50"), testNow)
@@ -399,6 +473,16 @@ func findCancelOf(store *FakeStore, userID domain.UserID, originalID domain.Tran
 	err := store.Atomic(context.Background(), func(ctx context.Context, repos domain.Repositories) error {
 		var err error
 		result, err = repos.Transactions.FindCancelOf(ctx, userID, originalID)
+		return err
+	})
+	return result, err
+}
+
+func findActiveDeposit(store *FakeStore, userID domain.UserID, betID domain.BetID) (domain.Transaction, error) {
+	var result domain.Transaction
+	err := store.Atomic(context.Background(), func(ctx context.Context, repos domain.Repositories) error {
+		var err error
+		result, err = repos.Transactions.FindActiveDeposit(ctx, userID, betID)
 		return err
 	})
 	return result, err

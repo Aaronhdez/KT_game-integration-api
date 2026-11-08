@@ -234,6 +234,15 @@ func (repository *fakeTransactionRepository) FindCancelOf(_ context.Context, use
 	return domain.Transaction{}, domain.ErrTransactionNotFound
 }
 
+func (repository *fakeTransactionRepository) FindActiveDeposit(_ context.Context, userID domain.UserID, betID domain.BetID) (domain.Transaction, error) {
+	for _, tx := range repository.state.transactions {
+		if tx.UserID == userID && tx.BetID == betID && isActiveSettlement(tx) {
+			return tx, nil
+		}
+	}
+	return domain.Transaction{}, domain.ErrTransactionNotFound
+}
+
 func (repository *fakeTransactionRepository) Update(_ context.Context, tx domain.Transaction) error {
 	if repository.store.UpdateTransactionErr != nil {
 		return repository.store.UpdateTransactionErr
