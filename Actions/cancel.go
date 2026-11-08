@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
@@ -91,9 +92,149 @@ func (h *CancelCommandHandler) cancelLocked(
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	// The cancel is stored and sent to the Wallet in the next steps.
-	_, _ = target, oldBalance
-	return TransactionResult{}, nil
+	if target.decision.Action == domain.CancelNoWalletCall {
+		return TransactionResult{}, nil
+	}
+
+	pending := domain.NewCancel(h.ids.NewTransactionID(), target.original, oldBalance, h.clock.Now())
+	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		return repos.Transactions.Insert(ctx, pending)
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: store pending: %w", err)
+	}
+
+	// The compensating operation: same bet, our cancel's ID as reference, so
+	// the Wallet sees a new movement and de-duplicates re-sends of this one.
+	newBalance, walletErr := h.sendCompensation(ctx, target.decision.Action, domain.WalletOperation{
+		UserID:    player.UserID,
+		Currency:  target.original.Currency,
+		Amount:    target.decision.Amount,
+		BetID:     target.bet.ID,
+		Reference: pending.ID,
+	})
+
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+	defer cancel()
+
+	switch {
+	case walletErr == nil:
+		return h.complete(writeCtx, uow, pending, target, newBalance)
+	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+		derived, err := balanceAfterCompensation(pending.OldBalance, target.decision)
+		if err != nil {
+			return h.leavePending(pending, target.bet, "balance_unknown", err), nil
+		}
+		return h.complete(writeCtx, uow, pending, target, derived)
+	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
+		return h.fail(writeCtx, uow, pending, target.bet, walletErr)
+	default:
+		// Unknown outcome: it stays PENDING and the API answers 202.
+		return h.leavePending(pending, target.bet, "pending", walletErr), nil
+	}
+}
+
+// sendCompensation sends the movement opposite to the original: a withdraw is
+// credited back with a Wallet deposit, a deposit is debited back with a
+// Wallet withdraw.
+func (h *CancelCommandHandler) sendCompensation(ctx context.Context, action domain.CancelAction, operation domain.WalletOperation) (domain.Money, error) {
+	if action == domain.CancelCreditBack {
+		return h.wallet.Deposit(ctx, operation)
+	}
+	return h.wallet.Withdraw(ctx, operation)
+}
+
+// balanceAfterCompensation is the new balance when the Wallet applied the
+// compensation without reporting it: the old balance plus or minus the amount.
+func balanceAfterCompensation(oldBalance domain.Money, decision domain.CancelDecision) (domain.Money, error) {
+	if decision.Action == domain.CancelCreditBack {
+		return domain.MoneyFromDecimal(oldBalance.Decimal().Add(decision.Amount.Decimal()))
+	}
+	return domain.MoneyFromDecimal(oldBalance.Decimal().Sub(decision.Amount.Decimal()))
+}
+
+// complete stores, in one database transaction, the cancel as COMPLETED, the
+// original as CANCELLED and its bet reverted: CANCELLED after a
+// withdraw cancel, back to PLACED after a deposit cancel. If that cannot be
+// stored, the database still says PENDING, and so does the result.
+func (h *CancelCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, target cancelTarget, newBalance domain.Money) (TransactionResult, error) {
+	now := h.clock.Now()
+	completed := pending
+	if err := completed.Complete(newBalance, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+	original := target.original
+	if err := original.MarkCancelled(now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+	bet := target.bet
+	if err := revertBet(&bet, original.Type, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Transactions.Update(ctx, completed); err != nil {
+			return err
+		}
+		if err := repos.Transactions.Update(ctx, original); err != nil {
+			return err
+		}
+		return repos.Bets.Update(ctx, bet)
+	})
+	if err != nil {
+		return h.leavePending(pending, target.bet, "outcome_not_stored", err), nil
+	}
+
+	h.log(slog.LevelInfo, completed, "completed", nil)
+	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
+}
+
+// revertBet applies the cancel of the bet's withdraw or deposit to the bet.
+func revertBet(bet *domain.Bet, cancelled domain.TransactionType, now time.Time) error {
+	if cancelled == domain.TransactionWithdraw {
+		return bet.Cancel(now)
+	}
+	return bet.RevertSettlement(now)
+}
+
+// fail stores the cancel as FAILED (the Wallet did not apply the
+// compensation) and returns the Wallet's error, which the API maps to 422 or
+// 502. The original and its bet do not change.
+func (h *CancelCommandHandler) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, bet domain.Bet, walletErr error) (TransactionResult, error) {
+	failed := pending
+	if err := failed.Fail(h.clock.Now()); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		return repos.Transactions.Update(ctx, failed)
+	})
+	if err != nil {
+		return h.leavePending(pending, bet, "outcome_not_stored", err), nil
+	}
+
+	outcome, level := "rejected", slog.LevelError
+	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
+		outcome, level = "insufficient_funds", slog.LevelWarn
+	}
+	h.log(level, failed, outcome, walletErr)
+	return TransactionResult{}, fmt.Errorf("cancel: %w", walletErr)
+}
+
+// leavePending returns the cancel as it is stored: PENDING, with the original
+// and its bet unchanged.
+func (h *CancelCommandHandler) leavePending(pending domain.Transaction, bet domain.Bet, outcome string, cause error) TransactionResult {
+	level := slog.LevelWarn
+	if outcome == "outcome_not_stored" {
+		level = slog.LevelError
+	}
+	h.log(level, pending, outcome, cause)
+	return TransactionResult{Transaction: pending, BetStatus: &bet.Status}
+}
+
+// log writes the one line per cancel (see logTransaction).
+func (h *CancelCommandHandler) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
+	logTransaction(h.logger, level, "cancel", tx, outcome, cause)
 }
 
 // findWhatToRevert loads the transaction to cancel and its bet:
