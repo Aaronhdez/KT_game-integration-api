@@ -166,6 +166,45 @@ No new Go tests. Checks:
    merge (step 7), run by the developer. Repository visibility is decided by
    the developer when the recruiter says with whom to share it (§11).
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Branch `12_docs_and_delivery` | `12_documentation`, merged into `main` after step 3 to run CI | The developer's branch name; CI ran on `main` (`6b12995`) |
+| CI on `push` to `main` and on `pull_request` | `push` on every branch + `pull_request` | Pushing a feature branch runs CI without opening a PR (the developer merges locally) |
+| DESIGN.md in 1–2 pages, the five §11 sections as 1–5 | ~1,970 words (≈ 4 pages): AI-assistance disclaimer, the spike, a Mermaid architecture diagram, a new section 1 "normal operation", then the five §11 points as sections 2–6; every case written as "If … → result" steps with a *Why:*; singular voice ("I"); assessment sections cited as "as §N of the assessment states" | Developer's choice: readability and an explicit disclaimer over the page limit. `docs/decisions.md` keeps the same numbering |
+| README walkthrough in the README | `docs/try-it.md`, linked from the Quick start; per-endpoint examples moved to an annex; index added; project layout under the documentation list | Developer's choice: a shorter README that a reviewer can scan |
+| `ARCHITECTURE.md`: tree updated | Simplified from 349 to ~220 lines: per-phase file tables replaced by an endpoints table and a ports → adapter → fake table; dependency rule and withdraw flow as Mermaid diagrams; .NET analogy kept; migrations list fixed (`00006`) | It had become a phase log that named private functions and was already out of date |
+| — | `fix(actions)`: the zero-amount withdraw error read "must be greater than zero invalid input: invalid amount"; now "invalid input: invalid amount: must be greater than zero", with a controller test | Found while writing the OpenAPI examples |
+| — | OpenAPI `status` enum includes `CANCELLED` | §7.2: a replay returns the current state, so a cancelled withdraw replays as `CANCELLED`; recorded in `docs/decisions.md` |
+| Redocly version "latest" | `@redocly/cli@2.71.0`, the newest release at least two weeks old; `redocly.yaml` turns off three rules that do not apply | Pinned, not floating |
+
+**Checks (2026-11-08).**
+
+- CI run [42494022972](https://github.com/Aaronhdez/KT_game-integration-api/actions/runs/42494022972):
+  the four jobs green, the race detector found nothing, integration tests
+  green against PostgreSQL 16.
+- OpenAPI lint clean (no warnings) locally and in CI.
+- The `curl` walkthrough run literally against `docker compose up`: the
+  happy path (`201` → replay `200` → `409` → `201 WON` → cancel `201`) and,
+  on a second run, the unreliable path: a withdraw answered `202`, the
+  deposit was refused with `409` while it was `PENDING`, and the resolver
+  completed it 35 s later after two dropped connections (Wallet `409
+  DuplicatedTransaction` on the third attempt) — the behaviour DESIGN
+  describes, now explained in `docs/try-it.md`.
+- Final review (test plan 4): `go list -deps` of `Domain`, `Actions`,
+  `Queries` contains no `net/http`, `pgx`, `Shared`, `Persistence` or
+  `Application`; no `float32`/`float64` outside tests; SQL values always as
+  `$n`, only `const` column lists are concatenated; only `.env.example` is
+  tracked and no secret literals in the code; one `DecideCancel` test per
+  §8.5 row plus the `422`, replay and `404` cases in `Actions`; replay,
+  conflict and concurrent-duplicate tests for the three operations; API key
+  never logged (`Shared/wallet/client_test.go`); `Domain/domaintest` is the
+  only package with fakes, as intended.
+- §10.2 not done: no ORM/query builder (reason in `docs/decisions.md`);
+  a cancel before its withdraw answers `404` (listed under "With more time"
+  in DESIGN, Phase 14 candidate).
+
 ## Definition of done
 
 - `docs/openapi.yaml` lints clean and matches the code.

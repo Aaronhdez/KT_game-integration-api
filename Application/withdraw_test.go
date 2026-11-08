@@ -88,6 +88,14 @@ func TestWithdrawController_MissingAmount_SaysItIsRequired(t *testing.T) {
 	assertErrorMessageContains(t, recorder, "amount is required")
 }
 
+func TestWithdrawController_ZeroAmount_SaysItMustBeGreaterThanZero(t *testing.T) {
+	fixture := givenAWithdrawController(t)
+
+	recorder := fixture.postAs(testUserID, `{"currency":"USD","amount":0,"providerTransactionId":"prov-tx-0001"}`)
+
+	assertErrorMessageContains(t, recorder, "invalid amount: must be greater than zero")
+}
+
 func TestWithdrawController_InvalidBody_DoesNotCallTheWallet(t *testing.T) {
 	fixture := givenAWithdrawController(t)
 
