@@ -92,11 +92,12 @@ func (h *CancelCommandHandler) cancelLocked(
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
+	pending := domain.NewCancel(h.ids.NewTransactionID(), target.original, oldBalance, h.clock.Now())
+
 	if target.decision.Action == domain.CancelNoWalletCall {
-		return TransactionResult{}, nil
+		return h.cancelWithoutWallet(ctx, uow, pending, target)
 	}
 
-	pending := domain.NewCancel(h.ids.NewTransactionID(), target.original, oldBalance, h.clock.Now())
 	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
 		return repos.Transactions.Insert(ctx, pending)
 	})
@@ -132,6 +133,42 @@ func (h *CancelCommandHandler) cancelLocked(
 		// Unknown outcome: it stays PENDING and the API answers 202.
 		return h.leavePending(pending, target.bet, "pending", walletErr), nil
 	}
+}
+
+// cancelWithoutWallet cancels a zero-amount deposit: no money moves, so there
+// is no Wallet call to keep track of and no PENDING step. One database
+// transaction stores the cancel as COMPLETED (newBalance = oldBalance), the
+// deposit as CANCELLED and the bet back to PLACED.
+func (h *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uow domain.UnitOfWork, cancel domain.Transaction, target cancelTarget) (TransactionResult, error) {
+	now := h.clock.Now()
+	completed := cancel
+	if err := completed.Complete(cancel.OldBalance, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+	original := target.original
+	if err := original.MarkCancelled(now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+	bet := target.bet
+	if err := revertBet(&bet, original.Type, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
+	}
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Transactions.Insert(ctx, completed); err != nil {
+			return err
+		}
+		if err := repos.Transactions.Update(ctx, original); err != nil {
+			return err
+		}
+		return repos.Bets.Update(ctx, bet)
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: store: %w", err)
+	}
+
+	h.log(slog.LevelInfo, completed, "completed_without_wallet", nil)
+	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
 }
 
 // sendCompensation sends the movement opposite to the original: a withdraw is

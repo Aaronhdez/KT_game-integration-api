@@ -133,6 +133,103 @@ func TestCancel_OfADeposit_ThenANewDepositOnTheBet_SettlesItAgain(t *testing.T) 
 	assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetWon), false)
 }
 
+// Cancel of a zero-amount deposit (§8.5): no money moves, so the Wallet is
+// only read for oldBalance (symmetric with the zero-amount deposit)
+
+func TestCancel_OfAZeroDeposit_ReturnsACompletedCancelWithTheOldBalanceAsNewBalance(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertResultTransaction(t, result, err, theCompletedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "0.00"), testBalanceAfterBet, testBalanceAfterBet))
+}
+
+func TestCancel_OfAZeroDeposit_ReturnsBetStatusPlacedAndNotReplayed(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetPlaced), false)
+}
+
+func TestCancel_OfAZeroDeposit_StoresTheCancelTheDepositCancelledAndTheBetPlaced(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{
+			theCompletedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "0.00"), testBalanceAfterBet, testBalanceAfterBet),
+			theSettlingDeposit(t, domain.TransactionCancelled, "0.00"),
+			theWithdraw(t, domain.TransactionCompleted),
+		},
+		bets: []domain.Bet{theBet(t, domain.BetPlaced)},
+	})
+}
+
+func TestCancel_OfAZeroDeposit_OnlyReadsTheBalance(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+func TestCancel_OfAZeroDeposit_LogsThatTheWalletWasNotCalled(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertLogContains(t, fixture.logs, `"msg":"cancel"`, `"outcome":"completed_without_wallet"`)
+}
+
+// oldBalance must be one we observed (§7.4): without it nothing is stored,
+// and the provider can retry.
+func TestCancel_OfAZeroDepositAndBalanceReadFails_IsWalletFailureNeverTimeout(t *testing.T) {
+	for _, testCase := range balanceReadFailures {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenACancelOfTheZeroDeposit(t)
+			fixture.wallet.Next(testCase.behaviour)
+
+			_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+			assertWalletFailureNotTimeout(t, err)
+		})
+	}
+}
+
+func TestCancel_OfAZeroDepositAndBalanceReadFails_StoresNothing(t *testing.T) {
+	for _, testCase := range balanceReadFailures {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenACancelOfTheZeroDeposit(t)
+			fixture.wallet.Next(testCase.behaviour)
+
+			fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+			assertStoreHolds(t, fixture.store, theStoreWithTheSettlingDeposit(t, domain.TransactionCompleted, "0.00", domain.BetLost))
+		})
+	}
+}
+
+func TestCancel_OfAZeroDepositAndStoreFails_ReturnsItsError(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertErrorIs(t, err, errDatabaseDown)
+}
+
+// The cancel, the deposit and the bet are written together: none alone.
+func TestCancel_OfAZeroDepositAndStoreFails_ChangesNothing(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertStoreHolds(t, fixture.store, theStoreWithTheSettlingDeposit(t, domain.TransactionCompleted, "0.00", domain.BetLost))
+}
+
 // Insufficient funds on a debit back (§8.5): 422 and nothing changes but the
 // FAILED cancel kept for audit. 25.00 left is not enough to take 25.00 back:
 // the Wallet requires amount < balance.
@@ -503,6 +600,14 @@ func givenACancelWithStore(t *testing.T, stored storeContents) cancelFixture {
 func givenACancelOfTheDeposit(t *testing.T) cancelFixture {
 	t.Helper()
 	return givenACancelOfTheDepositWithBalance(t, testBalanceAfterWin)
+}
+
+// givenACancelOfTheZeroDeposit has the completed withdraw, its completed
+// deposit of 0.00 and the bet LOST, and a Wallet balance of 4989.50.
+func givenACancelOfTheZeroDeposit(t *testing.T) cancelFixture {
+	t.Helper()
+	stored := theStoreWithTheSettlingDeposit(t, domain.TransactionCompleted, "0.00", domain.BetLost)
+	return newCancelFixture(t, domaintest.NewFakePlayerRepository(aUSDPlayer()), stored, testBalanceAfterBet)
 }
 
 // givenACancelOfTheDepositWithBalance is givenACancelOfTheDeposit after the
