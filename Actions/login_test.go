@@ -11,13 +11,7 @@ import (
 	"github.com/aaronhdez/kt_game-integration-api/Domain/domaintest"
 )
 
-const (
-	testUserID   domain.UserID = 34633089486
-	testUsername               = "player_usd"
-	testPassword               = "usd-pass-2026"
-)
-
-var testNow = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+const testPassword = "usd-pass-2026"
 
 func TestLogin_ValidCredentials_ReturnsTheIssuedToken(t *testing.T) {
 	fixture := givenALogin()
@@ -170,12 +164,5 @@ func assertVerifiedHashes(t *testing.T, hasher *domaintest.FakePasswordHasher, w
 	t.Helper()
 	if result := hasher.Verified(); !slices.Equal(result, want) {
 		t.Errorf("expected verified hashes %v, got %v", want, result)
-	}
-}
-
-func assertErrorIs(t *testing.T, err, target error) {
-	t.Helper()
-	if !errors.Is(err, target) {
-		t.Errorf("expected %v to be %q", err, target)
 	}
 }

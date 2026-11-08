@@ -655,10 +655,10 @@ func referencedWithdrawProblems(t *testing.T) []referencedWithdrawCase {
 	return []referencedWithdrawCase{
 		{"no transaction with that id", storeContents{}, domain.ErrTransactionNotFound},
 		{"withdraw of another player", storeContents{
-			transactions: []domain.Transaction{anotherPlayersWithdraw(t)},
+			transactions: []domain.Transaction{theWithdrawOfAnotherPlayer(t)},
 		}, domain.ErrTransactionNotFound},
 		{"it is a deposit", storeContents{
-			transactions: []domain.Transaction{aDepositWithTheTestProviderID(t, "10.50")},
+			transactions: []domain.Transaction{aDepositWithTheWithdrawnProviderID(t)},
 		}, domain.ErrTransactionNotFound},
 		{"withdraw in another currency", storeContents{
 			transactions: []domain.Transaction{theWithdrawInCurrency(t, domain.EUR)},
@@ -868,6 +868,27 @@ func theWithdraw(t *testing.T, status domain.TransactionStatus) domain.Transacti
 		newBalance := givenAParsedMoney(t, testBalanceAfterBet)
 		tx.NewBalance = &newBalance
 	}
+	return tx
+}
+
+// theWithdrawOfAnotherPlayer is a completed withdraw with the provider ID
+// the test deposits refer to, for another player.
+func theWithdrawOfAnotherPlayer(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := theWithdraw(t, domain.TransactionCompleted)
+	tx.ID = domaintest.FakeTransactionID(99)
+	tx.UserID = anotherUserID
+	tx.BetID = 99
+	return tx
+}
+
+// aDepositWithTheWithdrawnProviderID is a completed deposit of the test
+// player whose provider ID is the one the test deposits refer to as withdraw.
+func aDepositWithTheWithdrawnProviderID(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := aCompletedDeposit(t, "25.00", "5014.50")
+	tx.ID = domaintest.FakeTransactionID(70)
+	tx.ProviderTransactionID = testProviderID
 	return tx
 }
 
