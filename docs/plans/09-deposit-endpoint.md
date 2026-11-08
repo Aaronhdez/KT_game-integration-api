@@ -285,6 +285,17 @@ numbering).
 3. ~~**Withdrawn ID that belongs to a deposit.**~~ **Resolved:** `404` (it does
    not identify a withdraw).
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Step 5: one commit | Two commits (`78a342a` use case, `1268aaf` the `Deposit` side of the test Wallet wrappers) | The developer's choice when committing. |
+| `ErrTransactionExists` on insert → own lookup again | The lookup runs again for `ErrTransactionExists` **and** `ErrBetAlreadySettled` (`isDuplicateDeposit`, `replayAfterDuplicateInsert`) | An identical request racing past the lock breaks both unique indexes; PostgreSQL does not say which one it reports, so checking only one could turn a replay into a `409`. Not covered by a test: the `FakeStore` always reports the provider ID index first. |
+| Pending insert rejected by the active-settlement index → `409` | Same, through `insertDepositError`, shared by the positive and the zero-amount paths | The message ("the bet already has a pending or completed deposit") is the same in both. |
+| Referenced withdraw checks in the order of the table | Not found / not a withdraw → currency → status → bet | Any order gives the same codes for a single problem; the currency is checked before the status so a deposit in the wrong currency is always `400`. |
+| `FakeStore` / `Domain` changes "if a test shows otherwise" | None needed | — |
+| Manual `curl` check of step 9 | **Not done yet** | The Wallet mock and PostgreSQL were not running during the phase. Pending: run the Test plan and record the results here. |
+
 ## Definition of done
 
 - `Actions` imports only stdlib and `Domain`; `Application` does not import
