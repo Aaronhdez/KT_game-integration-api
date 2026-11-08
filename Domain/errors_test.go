@@ -26,6 +26,7 @@ func TestSpecificErrors_AreRecognisedAsTheirCategory(t *testing.T) {
 		{name: "bet not found", err: ErrBetNotFound, category: ErrNotFound},
 		{name: "idempotency conflict", err: ErrIdempotencyConflict, category: ErrConflict},
 		{name: "transaction exists", err: ErrTransactionExists, category: ErrConflict},
+		{name: "previous attempt failed", err: ErrPreviousAttemptFailed, category: ErrConflict},
 		{name: "bet already settled", err: ErrBetAlreadySettled, category: ErrConflict},
 		{name: "bet not settled", err: ErrBetNotSettled, category: ErrConflict},
 		{name: "transaction pending", err: ErrTransactionPending, category: ErrConflict},
