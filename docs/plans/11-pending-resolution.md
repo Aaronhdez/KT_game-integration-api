@@ -279,6 +279,37 @@ developer asks. Branch: `10_pending_resolution` (following the existing numberin
 4. ~~**Who writes the code?**~~ **Resolved:** Claude writes every step, the
    developer reviews each commit.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Step 3: migration "up/down" tested | Up covered by the integration tests; down checked by hand on a scratch database (all ups, the `00006` down, its up again) | The project has no automated down test (`Migrate` only goes up); one for this migration alone would break the pattern. |
+| Step 6 also adds `Transaction.RecordAttempt` | Moved to step 7 | It is used by the re-send, not by the scan. Already reflected in the commit sequence above. |
+| Step 7 test "outcome write fails → still `PENDING`, no error" | Replaced by "the new attempt cannot be recorded → its error (`500`), **no Wallet call**" | With the fake, an update error also fails the attempt record, which comes first. Not re-sending without a record is the rule that matters here; the outcome write is `finish`, already tested from the first attempt. |
+| — | `walletOperationOf(tx)` also builds the **first** attempt's request in the three operations | The first attempt and the re-sends build the request the same way, so "identical request" holds by construction. |
+| — | `asReplay` helper; `pending_overdue` decided inside `leavePending` | One line per handler for a retry's `200`; a first attempt can never be overdue (`CreatedAt` = now), so no extra branch. |
+| Cancel re-send repeats "the decision" | `decisionOfPendingCancel(original, cancel)`, not `DecideCancel` | The decision was taken when the cancel was accepted; re-running the §8.5 table on today's data could leave a `PENDING` stuck. |
+| Concurrency tests with `FailAfterApply` | With `FailBeforeApply` + a re-send that times out | Found with a deliberate mutation: with `FailAfterApply` the first re-send completes the transaction and the others never try, so the test did not prove that the recorded attempt stops them. |
+| `newHandlers` returns the handlers | Returns the handlers **and** the resolver | The resolver is built on the same withdraw, deposit and cancel handlers. |
+| — | `## Naming convention` in `ARCHITECTURE.md` promoted from `###` | The new Phase 11 section goes before it; it is not a subsection of either. |
+
+Each step was also checked with deliberate mutations (no delay, no attempt
+record, no re-send, inverted compensation): the matching tests failed, and the
+code was restored.
+
+**Manual check (2026-11-08, PostgreSQL 16 + `kentechsp/wallet-client`).**
+12 withdraws of 1.00 → 9 × `201`, 3 × `202`; the resolver resolved all three
+20–23 s after they were created (the Wallet answered `409`: applied), each
+`COMPLETED` with `newBalance = oldBalance − 1`. A retry of one of them while
+the resolver held the lock waited and got `200 COMPLETED` (replay), with no
+second re-send. `GET /player` 4988.00 = 5000 − 12. Withdraw of 6000 → `422`,
+its retry `422` with a single Wallet call (`FAILED`, `INSUFFICIENT_FUNDS`).
+API killed right after a `202` → `PENDING` in the database → restarted → the
+first resolver run re-sent it 2 s after startup (`409`) → `COMPLETED`. No API
+key, JWT secret or token in the logs. Not checked by hand: a graceful
+shutdown with Ctrl+C (Windows only allowed a forced kill); covered by the
+loop's "context done → goroutine finishes" test.
+
 ## Definition of done
 
 - Every `PENDING` transaction is re-sent by the resolver within about one
@@ -294,7 +325,7 @@ developer asks. Branch: `10_pending_resolution` (following the existing numberin
   Docker; integration tests green with `TEST_DATABASE_URL`.
 - Graceful shutdown waits for the resolver; an interrupted re-send leaves the
   transaction `PENDING`.
-- Manual `curl` check done against the real Wallet mock.
+- Manual `curl` check done against the real Wallet mock. ✔ (see As built)
 - `README.md`, `DESIGN.md` (§1, §2, §3), `ARCHITECTURE.md`, `.env.example`,
   `00-general-plan.md` updated.
 - The developer can explain each Go concept listed in the steps.
