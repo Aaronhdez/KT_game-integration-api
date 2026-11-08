@@ -266,6 +266,24 @@ No schema change: "one active settlement per bet" is the
 `transactions_active_settlement` index of Phase 04, mapped to
 `ErrBetAlreadySettled`.
 
+## Cancel (Phase 10)
+
+Same chain again (`RequireAuth` → `CancelController` → `CancelCommandHandler`,
+same ports, adapters and `PlayerLocker`).
+
+| Package / file | Content |
+|---|---|
+| `Actions/cancel.go` | `CancelCommandHandler`: validation, `cancelLocked` (`replayIfCancelled` → `findWhatToRevert` (lookup + `DecideCancel` + pending-deposit check) → old balance → zero deposit: `cancelWithoutWallet` / otherwise `PENDING` → `sendCompensation` → outcome), `replayAfterDuplicateInsert`, `applyCancel` (cancel `COMPLETED`, original `CANCELLED`, bet reverted, in memory), `complete`, `fail`, `leavePending` |
+| `Actions/deposit.go` | `checkNoCancelInProgress`: a deposit is refused while its withdraw has a `PENDING` cancel (a `COMPLETED` one has already made the bet `CANCELLED`) |
+| `Actions/operation.go` | `logTransaction` also logs `cancelled_transaction_id` for a cancel |
+| `Domain/ports_persistence.go` | `TransactionRepository.FindActiveDeposit(userID, betID)`: the `PENDING`/`COMPLETED` deposit of a bet (same condition as the active-settlement index) |
+| `Application/cancel.go` | `CancelController` and its `cancelRequest` DTO (`providerTransactionId` only) |
+| `Startup/main.go`, `router.go` | `Handlers.Cancel` = `RequireAuth(...)(CancelController)`; route `POST /api/v1/cancel` |
+
+No schema change: "one cancel per transaction" is the
+`transactions_single_cancel` index of Phase 04, mapped to
+`ErrAlreadyCancelled`.
+
 ### Naming convention
 
 | Layer | Name | Example |

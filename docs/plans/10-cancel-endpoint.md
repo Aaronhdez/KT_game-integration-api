@@ -278,6 +278,36 @@ the developer asks. Branch: `09_cancel` (following the existing numbering).
    of this phase; decided once Cancel is merged, as a separate `refactor` if
    accepted.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| Step 2 commit `feat(persistence): find the active deposit of a bet` | Committed as `f9b65f8` with the message `ocs(plan): add phase 10 cancel endpoint plan` | Wrong message when committing; the content is step 2. Left as is (rewriting history was not requested). |
+| Step 6: one commit | Two commits with the same message (`165f28b` zero-deposit cancel, `69b55aa` `applyCancel` helper shared by `complete` and `cancelWithoutWallet`) | The developer asked to remove the duplication after reviewing step 6. |
+| `ErrAlreadyCancelled` on insert → lookup again | Also for the zero-deposit path (its `COMPLETED` cancel is inserted directly) | Both paths insert a cancel row, so both can hit the single-cancel index. |
+| `DecideCancel`'s `ErrAlreadyCancelled` → `409`, logged at `error` | As planned; message "the transaction is already cancelled" | Only reachable with inconsistent data (a `CANCELLED` original without its cancel). |
+| `Domain`, `FakeWallet` unchanged | As planned | — |
+| Step 3: a deposit is refused while its withdraw has a non-`FAILED` cancel | Only a **`PENDING`** cancel counts as "in progress" (separate `fix(actions)` commit, with a test) | Found by the manual check: a deposit on a bet whose withdraw was already cancelled got `409` "the withdraw has a cancel in progress" instead of "bet already settled". A `COMPLETED` cancel does reach the check (its withdraw is `CANCELLED`, which `findBetToSettle` lets through to the bet), contrary to the step 3 comment. Same status code, wrong reason. |
+| Integration tests of `FindActiveDeposit` (step 2) | Run against PostgreSQL 16: green | — |
+| Manual `curl` check (step 9) | Done against the real Wallet mock (scratch script, not committed), see below | — |
+
+**Manual check (2026-11-08, PostgreSQL 16 + `kentechsp/wallet-client`).**
+Withdraw cancel → `201` `CANCELLED`, balance back; same cancel → `200`;
+deposit on the cancelled bet → `409` (after the fix: "bet … is CANCELLED").
+Withdraw + deposit 25 → cancel the withdraw `409` ("cancel the deposit … first"),
+cancel the deposit `201` `PLACED` with the 25 taken back, a new deposit on the
+same bet `201` `WON`, replay of the first cancel `200` with `betStatus` `WON`.
+Zero deposit `201` `LOST` → its cancel `201` `PLACED`, `oldBalance` =
+`newBalance`, no Wallet call in the logs. Another player's / unknown ID `404`,
+missing ID or malformed JSON `400`, no token `401`. Deposit of 50 000, then
+spend all but 100 → cancelling the deposit `422`, cancel `FAILED`, deposit
+still `COMPLETED`, bet `WON`; retry `409`. Database: every `COMPLETED` cancel
+has its original `CANCELLED` and the right bet status; 7 cancel log lines (4
+`completed`, 2 `completed_without_wallet`, 1 `insufficient_funds`); no secret
+in the logs. The Wallet left 2 of the ~14 withdraws `PENDING` (`202`), which
+blocked the scenarios built on them (`409` "withdraw is not completed", as
+expected); they were re-run. Phase 09's own manual check is still pending.
+
 ## Definition of done
 
 - `Actions` imports only stdlib and `Domain`; `Application` does not import
@@ -292,6 +322,6 @@ the developer asks. Branch: `09_cancel` (following the existing numbering).
 - Withdraw cancel blocked by a `PENDING` deposit; deposit blocked by a
   cancel in progress.
 - No `float` anywhere in the request/response path.
-- Manual `curl` check done against the real Wallet mock.
+- Manual `curl` check done against the real Wallet mock. ✔ (see As built)
 - `README.md`, `DESIGN.md`, `ARCHITECTURE.md`, `00-general-plan.md` updated.
 - The developer can explain each Go concept listed in the steps.
