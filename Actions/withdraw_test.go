@@ -18,6 +18,173 @@ const testProviderID = "prov-tx-0001"
 
 var errDatabaseDown = errors.New("database down")
 
+// Success
+
+func TestWithdraw_WalletApplies_ReturnsTheCompletedTransaction(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertResultTransaction(t, result, err, aCompletedWithdraw(t, "10.50", "4989.50"))
+}
+
+func TestWithdraw_WalletApplies_ReturnsBetStatusPlacedAndNotReplayed(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetPlaced), false)
+}
+
+func TestWithdraw_WalletApplies_StoresTheTransactionAsCompleted(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactions(t, fixture.store, err, aCompletedWithdraw(t, "10.50", "4989.50"))
+}
+
+func TestWithdraw_WalletApplies_CreatesAPlacedBetWithTheReservedID(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredBets(t, fixture.store, err, aPlacedBet(t, "10.50"))
+}
+
+func TestWithdraw_ReadsTheOldBalanceThenSendsTheBetIDAndTheTransactionIDAsReference(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), withdrawCall(t, "10.50"))
+}
+
+// Intent first (§9.1): if the process died during the Wallet call, this row
+// would still tell us that the call was made.
+func TestWithdraw_StoresThePendingTransactionBeforeCallingTheWallet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	wallet := &storeObservingWallet{FakeWallet: fixture.wallet, store: fixture.store}
+
+	fixture.withdrawWith(wallet).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertTransactionsSeenByTheWallet(t, wallet, aPendingWithdraw(t, "10.50"))
+}
+
+func TestWithdraw_WalletApplies_LogsTheOutcomeWithTheProviderTransactionID(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertLogContains(t, fixture.logs, `"provider_transaction_id":"prov-tx-0001"`, `"outcome":"completed"`)
+}
+
+// Applied, new balance unknown (e.g. a 2xx with an unreadable body)
+
+func TestWithdraw_WalletAppliedButBalanceUnknown_CompletesWithOldBalanceMinusAmount(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	wallet := balanceUnknownWallet{FakeWallet: fixture.wallet}
+
+	result, err := fixture.withdrawWith(wallet).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertResultTransaction(t, result, err, aCompletedWithdraw(t, "10.50", "4989.50"))
+}
+
+// Unknown outcome (§9.3): never FAILED
+
+var unknownOutcomes = []struct {
+	name      string
+	behaviour domaintest.Behaviour
+}{
+	{"error after applying", domaintest.FailAfterApply},
+	{"error before applying", domaintest.FailBeforeApply},
+	{"timeout", domaintest.TimeOut},
+}
+
+func TestWithdraw_WalletOutcomeUnknown_ReturnsPendingWithoutError(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenAWithdraw(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+			assertResultTransaction(t, result, err, aPendingWithdraw(t, "10.50"))
+		})
+	}
+}
+
+func TestWithdraw_WalletOutcomeUnknown_ReturnsNoBetStatus(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenAWithdraw(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+			assertBetStatusAndReplayed(t, result, err, nil, false)
+		})
+	}
+}
+
+func TestWithdraw_WalletOutcomeUnknown_KeepsThePendingTransactionAndCreatesNoBet(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenAWithdraw(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+			assertStoredTransactionsAndNoBets(t, fixture.store, aPendingWithdraw(t, "10.50"))
+		})
+	}
+}
+
+func TestWithdraw_WalletTooSlowForTheCaller_ReturnsPendingWithoutError(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Slow)
+
+	result, err := fixture.withdraw.Execute(givenACallerGivingUpAfter(t, 20*time.Millisecond), aWithdrawCommand(t, "10.50"))
+
+	assertResultTransaction(t, result, err, aPendingWithdraw(t, "10.50"))
+}
+
+// Not applied (§8.3, §9.3): FAILED record kept, no bet
+
+func TestWithdraw_InsufficientFunds_IsInsufficientFunds(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "6000.00"))
+
+	assertErrorIs(t, err, domain.ErrInsufficientFunds)
+}
+
+func TestWithdraw_InsufficientFunds_KeepsAFailedTransactionAndCreatesNoBet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "6000.00"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "6000.00"))
+}
+
+func TestWithdraw_WalletRejects_IsWalletRejected(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrWalletRejected)
+}
+
+func TestWithdraw_WalletRejects_KeepsAFailedTransactionAndCreatesNoBet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "10.50"))
+}
+
 // Validation (§7.3, §8.3): before any Wallet call
 
 var invalidWithdrawCommands = []struct {
@@ -163,6 +330,39 @@ func TestWithdraw_PendingInsertFails_DoesNotCallTheWalletWithdraw(t *testing.T) 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
 	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+// The Wallet applied the withdraw but the outcome could not be saved: the
+// database still says PENDING, so that is what the API reports (202).
+func TestWithdraw_OutcomeWriteFails_ReturnsPendingWithoutError(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertResultTransaction(t, result, err, aPendingWithdraw(t, "10.50"))
+}
+
+func TestWithdraw_OutcomeWriteFails_KeepsThePendingTransactionAndCreatesNoBet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, aPendingWithdraw(t, "10.50"))
+}
+
+// The provider may hang up while we wait for the Wallet; the Wallet may still
+// have taken the money, so the outcome must be stored anyway.
+func TestWithdraw_CallerLeavesDuringTheWalletCall_StillStoresTheOutcome(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	ctx, leave := context.WithCancel(context.Background())
+	defer leave()
+	wallet := callerLeavingWallet{FakeWallet: fixture.wallet, leave: leave}
+
+	fixture.withdrawWith(wallet).Execute(ctx, aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactions(t, fixture.store, nil, aCompletedWithdraw(t, "10.50", "4989.50"))
 }
 
 /////////////////////////////////////////////////////////////////////////////////////

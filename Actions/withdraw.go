@@ -2,11 +2,17 @@ package actions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
+
+// outcomeWriteTimeout bounds the database writes made after the Wallet call,
+// which no longer depend on the request's context.
+const outcomeWriteTimeout = 5 * time.Second
 
 // WithdrawCommand represents the data required to execute a withdraw operation.
 type WithdrawCommand struct {
@@ -114,6 +120,111 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 		return TransactionResult{}, fmt.Errorf("withdraw: store pending: %w", err)
 	}
 
-	// The Wallet call and the outcome come in the next step.
-	return TransactionResult{Transaction: pending}, nil
+	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
+	// it (docs/wallet-findings.md, Q8)
+	newBalance, walletErr := h.wallet.Withdraw(ctx, domain.WalletOperation{
+		UserID:    player.UserID,
+		Currency:  player.Currency,
+		Amount:    amount,
+		BetID:     pending.BetID,
+		Reference: pending.ID,
+	})
+
+	// The Wallet may have taken the money even if the caller has gone away
+	// meanwhile, so the outcome is stored with a context that is not cancelled
+	// with the request, bounded by its own timeout.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+	defer cancel()
+
+	switch {
+	case walletErr == nil:
+		return h.complete(writeCtx, uow, pending, newBalance)
+	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+		// Exact: the old balance was read under the player's lock just before.
+		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(amount.Decimal()))
+		if err != nil {
+			return h.leavePending(pending, "balance_unknown", err), nil
+		}
+		return h.complete(writeCtx, uow, pending, derived)
+	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
+		return h.fail(writeCtx, uow, pending, walletErr)
+	default:
+		// Unknown outcome (§9.3): it stays PENDING and the API answers 202.
+		return h.leavePending(pending, "pending", walletErr), nil
+	}
+}
+
+// complete stores the withdraw as COMPLETED and creates its PLACED bet, both
+// in one database transaction. If that cannot be stored, the database still
+// says PENDING, and so does the result.
+func (h *WithdrawCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, newBalance domain.Money) (TransactionResult, error) {
+	now := h.clock.Now()
+	completed := pending
+	if err := completed.Complete(newBalance, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
+	}
+	bet := domain.NewPlacedBet(completed.BetID, completed.UserID, completed.Currency, completed.Amount, now)
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Bets.Insert(ctx, bet); err != nil {
+			return err
+		}
+		return repos.Transactions.Update(ctx, completed)
+	})
+	if err != nil {
+		return h.leavePending(pending, "outcome_not_stored", err), nil
+	}
+
+	h.log(slog.LevelInfo, completed, "completed", nil)
+	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
+}
+
+// fail stores the withdraw as FAILED (the Wallet did not apply it) and
+// returns the Wallet's error, which the API maps to 422 or 502.
+func (h *WithdrawCommandHandler) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, walletErr error) (TransactionResult, error) {
+	failed := pending
+	if err := failed.Fail(h.clock.Now()); err != nil {
+		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
+	}
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		return repos.Transactions.Update(ctx, failed)
+	})
+	if err != nil {
+		return h.leavePending(pending, "outcome_not_stored", err), nil
+	}
+
+	outcome, level := "rejected", slog.LevelError
+	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
+		outcome, level = "insufficient_funds", slog.LevelWarn
+	}
+	h.log(level, failed, outcome, walletErr)
+	return TransactionResult{}, fmt.Errorf("withdraw: %w", walletErr)
+}
+
+// leavePending returns the transaction as it is stored: PENDING, with no bet.
+func (h *WithdrawCommandHandler) leavePending(pending domain.Transaction, outcome string, cause error) TransactionResult {
+	level := slog.LevelWarn
+	if outcome == "outcome_not_stored" {
+		level = slog.LevelError
+	}
+	h.log(level, pending, outcome, cause)
+	return TransactionResult{Transaction: pending}
+}
+
+// log writes the one line per withdraw required by §9.7. It never includes
+// tokens or secrets: only identifiers, the amount and the outcome.
+func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
+	attributes := []any{
+		"transaction_id", tx.ID,
+		"provider_transaction_id", tx.ProviderTransactionID,
+		"user_id", tx.UserID,
+		"bet_id", tx.BetID,
+		"amount", tx.Amount.String(),
+		"outcome", outcome,
+	}
+	if cause != nil {
+		attributes = append(attributes, "error", cause.Error())
+	}
+	h.logger.Log(context.Background(), level, "withdraw", attributes...)
 }
