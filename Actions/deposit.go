@@ -109,15 +109,16 @@ func (h *DepositCommandHandler) depositLocked(
 		Currency:              player.Currency,
 		OldBalance:            oldBalance,
 	}, h.clock.Now())
+
+	if amount.IsZero() {
+		return h.settleWithoutWallet(ctx, uow, pending, bet)
+	}
+
 	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
 		return repos.Transactions.Insert(ctx, pending)
 	})
-
-	if errors.Is(err, domain.ErrBetAlreadySettled) {
-		return TransactionResult{}, fmt.Errorf("deposit: %w: the bet already has a pending or completed deposit", domain.ErrBetAlreadySettled)
-	}
 	if err != nil {
-		return TransactionResult{}, fmt.Errorf("deposit: store pending: %w", err)
+		return TransactionResult{}, insertDepositError("store pending", err)
 	}
 
 	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
@@ -152,6 +153,41 @@ func (h *DepositCommandHandler) depositLocked(
 		// Unknown outcome: it stays PENDING and the API answers 202.
 		return h.leavePending(pending, bet, "pending", walletErr), nil
 	}
+}
+
+func (h *DepositCommandHandler) settleWithoutWallet(ctx context.Context, uow domain.UnitOfWork, deposit domain.Transaction, bet domain.Bet) (TransactionResult, error) {
+	now := h.clock.Now()
+	completed := deposit
+	if err := completed.Complete(deposit.OldBalance, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("deposit: %w", err)
+	}
+	settled := bet
+	if err := settled.Settle(completed.Amount, now); err != nil {
+		return TransactionResult{}, fmt.Errorf("deposit: %w", err)
+	}
+
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Transactions.Insert(ctx, completed); err != nil {
+			return err
+		}
+		return repos.Bets.Update(ctx, settled)
+	})
+	if err != nil {
+		return TransactionResult{}, insertDepositError("store", err)
+	}
+
+	h.log(slog.LevelInfo, completed, "completed_without_wallet", nil)
+	return TransactionResult{Transaction: completed, BetStatus: &settled.Status}, nil
+}
+
+// insertDepositError describes a failed insert of a new deposit. The bet is
+// still PLACED while another deposit of it is PENDING, so only the unique
+// index on active settlements sees that the bet already has a deposit (409).
+func insertDepositError(action string, err error) error {
+	if errors.Is(err, domain.ErrBetAlreadySettled) {
+		return fmt.Errorf("deposit: %w: the bet already has a pending or completed deposit", domain.ErrBetAlreadySettled)
+	}
+	return fmt.Errorf("deposit: %s: %w", action, err)
 }
 
 // complete stores the deposit as COMPLETED and settles its bet (WON or LOST),

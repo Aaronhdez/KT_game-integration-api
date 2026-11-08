@@ -244,6 +244,115 @@ func TestDeposit_BetWithAFailedDeposit_CompletesTheNewDeposit(t *testing.T) {
 	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
 }
 
+// Zero amount: the bet is LOST, no money moves, so the
+// deposit is not forwarded to the Wallet
+
+func TestDeposit_ZeroAmount_ReturnsACompletedDepositWithTheOldBalanceAsNewBalance(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertResultTransaction(t, result, err, aCompletedDeposit(t, "0.00", testBalanceAfterBet))
+}
+
+func TestDeposit_ZeroAmount_ReturnsBetStatusLostAndNotReplayed(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetLost), false)
+}
+
+func TestDeposit_ZeroAmount_StoresTheDepositAsCompletedAndTheBetAsLost(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{aCompletedDeposit(t, "0.00", testBalanceAfterBet), theWithdraw(t, domain.TransactionCompleted)},
+		bets:         []domain.Bet{theBet(t, domain.BetLost)},
+	})
+}
+
+func TestDeposit_ZeroAmount_OnlyReadsTheBalance(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+func TestDeposit_ZeroAmount_LogsThatTheWalletWasNotCalled(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertLogContains(t, fixture.logs, `"msg":"deposit"`, `"provider_transaction_id":"prov-tx-0002"`, `"outcome":"completed_without_wallet"`)
+}
+
+// oldBalance must be one we observed (§7.4): without it nothing is stored, and
+// the provider can retry.
+func TestDeposit_ZeroAmountAndBalanceReadFails_IsWalletFailureNeverTimeout(t *testing.T) {
+	for _, testCase := range balanceReadFailures {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADeposit(t)
+			fixture.wallet.Next(testCase.behaviour)
+
+			_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+			assertWalletFailureNotTimeout(t, err)
+		})
+	}
+}
+
+func TestDeposit_ZeroAmountAndBalanceReadFails_StoresNothing(t *testing.T) {
+	for _, testCase := range balanceReadFailures {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADeposit(t)
+			fixture.wallet.Next(testCase.behaviour)
+
+			fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+			assertStoreHolds(t, fixture.store, theArrangedStore(t))
+		})
+	}
+}
+
+func TestDeposit_ZeroAmountOnABetWithAPendingDeposit_IsBetAlreadySettled(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionPending)))
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertErrorIs(t, err, domain.ErrBetAlreadySettled)
+}
+
+func TestDeposit_ZeroAmountOnABetWithAPendingDeposit_LeavesTheBetPlaced(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionPending)))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionPending)))
+}
+
+func TestDeposit_ZeroAmountAndStoreFails_ReturnsItsError(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertErrorIs(t, err, errDatabaseDown)
+}
+
+// The deposit and the bet are written together: neither is stored alone.
+func TestDeposit_ZeroAmountAndStoreFails_LeavesTheBetPlaced(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStore(t))
+}
+
 // Validation: before the lock and any Wallet call
 
 var invalidDepositCommands = []struct {
