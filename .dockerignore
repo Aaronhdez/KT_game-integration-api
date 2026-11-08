@@ -1,0 +1,29 @@
+# Files never sent to the Docker build context.
+
+# Secrets: .env must never reach an image layer.
+.env
+.env.*
+!.env.example
+
+# Version control, editors, local tooling
+.git
+.gitignore
+.gitattributes
+.claude
+.vscode
+.idea
+
+# Local build output
+bin
+*.exe
+*.test
+*.out
+coverage.*
+
+# Not needed to build the binary
+docs
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker

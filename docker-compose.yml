@@ -1,0 +1,70 @@
+# Game Integration API + PostgreSQL + the mock Wallet.
+#   cp .env.example .env      # then set JWT_SECRET (and POSTGRES_PASSWORD)
+#   docker compose up --build
+#   docker compose down -v    # reset: deletes our database, restarts the Wallet
+# Ports are published on localhost only.
+
+services:
+  api:
+    build: .
+    env_file: .env
+    # Always point at the other containers, whatever .env says.
+    # DATABASE_URL is built from POSTGRES_*, so the password is written only once.
+    environment:
+      HTTP_PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      WALLET_BASE_URL: http://wallet:8000
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      wallet:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      # Every check is a logged request: check often only while starting.
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
+    # More than SHUTDOWN_TIMEOUT (10s), so in-flight requests can finish
+    # before Docker kills the process.
+    stop_grace_period: 15s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs only on an empty volume: creates gameapi_test for the integration tests.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # $$ escapes Compose interpolation: the variables are read inside the container.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  wallet:
+    # The image tested in Phase 01 (docs/wallet-findings.md). It is linux/arm64
+    # only: on amd64 hosts Docker runs it under emulation.
+    image: kentechsp/wallet-client:latest@sha256:682a98803dd117469759e5f10be788e4a0418de3fa5dd12819bb4fe2d1890abf
+    platform: linux/arm64
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      # /health needs no API key.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
