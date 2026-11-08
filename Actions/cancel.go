@@ -19,12 +19,7 @@ type CancelCommand struct {
 
 // CancelCommandHandler handles the execution of cancel commands.
 type CancelCommandHandler struct {
-	playerRepository domain.PlayerRepository
-	locker           domain.PlayerLocker
-	wallet           domain.WalletClient
-	ids              domain.IDGenerator
-	clock            domain.Clock
-	logger           *slog.Logger
+	operation
 }
 
 // NewCancelCommandHandler creates a new instance of CancelCommandHandler with the provided dependencies.
@@ -36,14 +31,15 @@ func NewCancelCommandHandler(
 	clock domain.Clock,
 	logger *slog.Logger,
 ) *CancelCommandHandler {
-	return &CancelCommandHandler{
+	return &CancelCommandHandler{operation{
+		name:             "cancel",
 		playerRepository: playerRepository,
 		locker:           locker,
 		wallet:           wallet,
 		ids:              ids,
 		clock:            clock,
 		logger:           logger,
-	}
+	}}
 }
 
 // cancelTarget is what a cancel reverts: the original transaction
@@ -55,26 +51,26 @@ type cancelTarget struct {
 
 // Execute reverts a completed withdraw or deposit of the player through a
 // compensating Wallet operation, as decided by domain.DecideCancel.
-func (h *CancelCommandHandler) Execute(ctx context.Context, command CancelCommand) (TransactionResult, error) {
+func (handler *CancelCommandHandler) Execute(ctx context.Context, command CancelCommand) (TransactionResult, error) {
 	providerID, err := domain.ParseProviderTransactionID(command.ProviderTransactionID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
-	player, err := h.playerRepository.FindByID(ctx, command.UserID)
+	player, err := handler.playerRepository.FindByID(ctx, command.UserID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
 	var result TransactionResult
-	err = h.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
+	err = handler.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
 		var lockedErr error
-		result, lockedErr = h.cancelLocked(ctx, uow, player, providerID)
+		result, lockedErr = handler.cancelLocked(ctx, uow, player, providerID)
 		return lockedErr
 	})
 	return result, err
 }
 
-func (h *CancelCommandHandler) cancelLocked(
+func (handler *CancelCommandHandler) cancelLocked(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	player domain.Player,
@@ -82,28 +78,28 @@ func (h *CancelCommandHandler) cancelLocked(
 ) (TransactionResult, error) {
 	// First: while a cancel is PENDING or FAILED its original is still
 	// COMPLETED, so DecideCancel alone would accept a second cancel.
-	if result, found, err := h.replayIfCancelled(ctx, uow, player.UserID, providerID); found || err != nil {
+	if result, found, err := handler.replayIfCancelled(ctx, uow, player.UserID, providerID); found || err != nil {
 		return result, err
 	}
 
 	// Under the lock: no other operation of the player can settle, cancel or
 	// change the bet between this decision and the cancel being stored.
-	target, err := h.findWhatToRevert(ctx, uow, player.UserID, providerID)
+	target, err := handler.findWhatToRevert(ctx, uow, player.UserID, providerID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	oldBalance, err := readOldBalance(ctx, h.wallet, player)
+	oldBalance, err := handler.readOldBalance(ctx, player)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	pending := domain.NewCancel(h.ids.NewTransactionID(), target.original, oldBalance, h.clock.Now())
+	pending := domain.NewCancel(handler.ids.NewTransactionID(), target.original, oldBalance, handler.clock.Now())
 
 	if target.decision.Action == domain.CancelNoWalletCall {
-		result, err := h.cancelWithoutWallet(ctx, uow, pending, target)
+		result, err := handler.cancelWithoutWallet(ctx, uow, pending, target)
 		if errors.Is(err, domain.ErrAlreadyCancelled) {
-			return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
+			return handler.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
 		}
 		return result, err
 	}
@@ -112,7 +108,7 @@ func (h *CancelCommandHandler) cancelLocked(
 		return repos.Transactions.Insert(ctx, pending)
 	})
 	if errors.Is(err, domain.ErrAlreadyCancelled) {
-		return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
+		return handler.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
 	}
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: store pending: %w", err)
@@ -120,7 +116,7 @@ func (h *CancelCommandHandler) cancelLocked(
 
 	// The compensating operation: same bet, our cancel's ID as reference, so
 	// the Wallet sees a new movement and de-duplicates re-sends of this one.
-	newBalance, walletErr := h.sendCompensation(ctx, target.decision.Action, domain.WalletOperation{
+	newBalance, walletErr := handler.sendCompensation(ctx, target.decision.Action, domain.WalletOperation{
 		UserID:    player.UserID,
 		Currency:  target.original.Currency,
 		Amount:    target.decision.Amount,
@@ -128,23 +124,25 @@ func (h *CancelCommandHandler) cancelLocked(
 		Reference: pending.ID,
 	})
 
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
+	// Until the cancel completes, the original and its bet do not change.
+	betStatus := &target.bet.Status
 	switch {
 	case walletErr == nil:
-		return h.complete(writeCtx, uow, pending, target, newBalance)
+		return handler.complete(writeCtx, uow, pending, target, newBalance)
 	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
 		derived, err := balanceAfterCompensation(pending.OldBalance, target.decision)
 		if err != nil {
-			return h.leavePending(pending, target.bet, "balance_unknown", err), nil
+			return handler.leavePending(pending, betStatus, "balance_unknown", err), nil
 		}
-		return h.complete(writeCtx, uow, pending, target, derived)
+		return handler.complete(writeCtx, uow, pending, target, derived)
 	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
-		return h.fail(writeCtx, uow, pending, target.bet, walletErr)
+		return handler.fail(writeCtx, uow, pending, betStatus, walletErr)
 	default:
 		// Unknown outcome: it stays PENDING and the API answers 202.
-		return h.leavePending(pending, target.bet, "pending", walletErr), nil
+		return handler.leavePending(pending, betStatus, "pending", walletErr), nil
 	}
 }
 
@@ -158,7 +156,7 @@ func (h *CancelCommandHandler) cancelLocked(
 //
 // The request carries nothing but the key, so a cancel can never be a
 // "different payload" conflict.
-func (h *CancelCommandHandler) replayIfCancelled(
+func (handler *CancelCommandHandler) replayIfCancelled(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	userID domain.UserID,
@@ -203,13 +201,13 @@ func (h *CancelCommandHandler) replayIfCancelled(
 // unique index although our lookup found none: the same cancel was stored
 // meanwhile (only possible if the lock failed, e.g. two API instances), so it
 // is a replay.
-func (h *CancelCommandHandler) replayAfterDuplicateInsert(
+func (handler *CancelCommandHandler) replayAfterDuplicateInsert(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	userID domain.UserID,
 	providerID domain.ProviderTransactionID,
 ) (TransactionResult, error) {
-	result, found, err := h.replayIfCancelled(ctx, uow, userID, providerID)
+	result, found, err := handler.replayIfCancelled(ctx, uow, userID, providerID)
 	if found || err != nil {
 		return result, err
 	}
@@ -220,8 +218,8 @@ func (h *CancelCommandHandler) replayAfterDuplicateInsert(
 // is no Wallet call to keep track of and no PENDING step. One database
 // transaction stores the cancel as COMPLETED (newBalance = oldBalance), the
 // deposit as CANCELLED and the bet back to PLACED.
-func (h *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uow domain.UnitOfWork, cancel domain.Transaction, target cancelTarget) (TransactionResult, error) {
-	state, err := applyCancel(cancel, target, cancel.OldBalance, h.clock.Now())
+func (handler *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uow domain.UnitOfWork, cancel domain.Transaction, target cancelTarget) (TransactionResult, error) {
+	state, err := applyCancel(cancel, target, cancel.OldBalance, handler.clock.Now())
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
@@ -239,18 +237,18 @@ func (h *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uow doma
 		return TransactionResult{}, fmt.Errorf("cancel: store: %w", err)
 	}
 
-	h.log(slog.LevelInfo, state.cancel, "completed_without_wallet", nil)
+	handler.log(slog.LevelInfo, state.cancel, "completed_without_wallet", nil)
 	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 
 // sendCompensation sends the movement opposite to the original: a withdraw is
 // credited back with a Wallet deposit, a deposit is debited back with a
 // Wallet withdraw.
-func (h *CancelCommandHandler) sendCompensation(ctx context.Context, action domain.CancelAction, operation domain.WalletOperation) (domain.Money, error) {
+func (handler *CancelCommandHandler) sendCompensation(ctx context.Context, action domain.CancelAction, compensation domain.WalletOperation) (domain.Money, error) {
 	if action == domain.CancelCreditBack {
-		return h.wallet.Deposit(ctx, operation)
+		return handler.wallet.Deposit(ctx, compensation)
 	}
-	return h.wallet.Withdraw(ctx, operation)
+	return handler.wallet.Withdraw(ctx, compensation)
 }
 
 // balanceAfterCompensation is the new balance when the Wallet applied the
@@ -266,8 +264,8 @@ func balanceAfterCompensation(oldBalance domain.Money, decision domain.CancelDec
 // original as CANCELLED and its bet reverted: CANCELLED after a
 // withdraw cancel, back to PLACED after a deposit cancel. If that cannot be
 // stored, the database still says PENDING, and so does the result.
-func (h *CancelCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, target cancelTarget, newBalance domain.Money) (TransactionResult, error) {
-	state, err := applyCancel(pending, target, newBalance, h.clock.Now())
+func (handler *CancelCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, target cancelTarget, newBalance domain.Money) (TransactionResult, error) {
+	state, err := applyCancel(pending, target, newBalance, handler.clock.Now())
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
@@ -282,10 +280,10 @@ func (h *CancelCommandHandler) complete(ctx context.Context, uow domain.UnitOfWo
 		return repos.Bets.Update(ctx, state.bet)
 	})
 	if err != nil {
-		return h.leavePending(pending, target.bet, "outcome_not_stored", err), nil
+		return handler.leavePending(pending, &target.bet.Status, "outcome_not_stored", err), nil
 	}
 
-	h.log(slog.LevelInfo, state.cancel, "completed", nil)
+	handler.log(slog.LevelInfo, state.cancel, "completed", nil)
 	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 
@@ -320,52 +318,12 @@ func applyCancel(pending domain.Transaction, target cancelTarget, newBalance dom
 	return state, nil
 }
 
-// fail stores the cancel as FAILED (the Wallet did not apply the
-// compensation) and returns the Wallet's error, which the API maps to 422 or
-// 502. The original and its bet do not change.
-func (h *CancelCommandHandler) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, bet domain.Bet, walletErr error) (TransactionResult, error) {
-	failed := pending
-	if err := failed.Fail(h.clock.Now()); err != nil {
-		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
-	}
-
-	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		return repos.Transactions.Update(ctx, failed)
-	})
-	if err != nil {
-		return h.leavePending(pending, bet, "outcome_not_stored", err), nil
-	}
-
-	outcome, level := "rejected", slog.LevelError
-	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
-		outcome, level = "insufficient_funds", slog.LevelWarn
-	}
-	h.log(level, failed, outcome, walletErr)
-	return TransactionResult{}, fmt.Errorf("cancel: %w", walletErr)
-}
-
-// leavePending returns the cancel as it is stored: PENDING, with the original
-// and its bet unchanged.
-func (h *CancelCommandHandler) leavePending(pending domain.Transaction, bet domain.Bet, outcome string, cause error) TransactionResult {
-	level := slog.LevelWarn
-	if outcome == "outcome_not_stored" {
-		level = slog.LevelError
-	}
-	h.log(level, pending, outcome, cause)
-	return TransactionResult{Transaction: pending, BetStatus: &bet.Status}
-}
-
-// log writes the one line per cancel (see logTransaction).
-func (h *CancelCommandHandler) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
-	logTransaction(h.logger, level, "cancel", tx, outcome, cause)
-}
-
 // findWhatToRevert loads the transaction to cancel and its bet:
 //   - unknown or another player's → ErrTransactionNotFound (404);
 //   - PENDING → ErrTransactionPending, FAILED → ErrNothingToRevert (409);
 //   - a withdraw whose bet is settled → ErrBetAlreadySettled (409);
 //   - a withdraw whose bet has a PENDING deposit → ErrTransactionPending (409).
-func (h *CancelCommandHandler) findWhatToRevert(
+func (handler *CancelCommandHandler) findWhatToRevert(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	userID domain.UserID,
@@ -393,7 +351,7 @@ func (h *CancelCommandHandler) findWhatToRevert(
 		if errors.Is(err, domain.ErrAlreadyCancelled) {
 			// replayIfCancelled found no cancel for this CANCELLED original:
 			// the data is inconsistent, so there is no earlier result to return.
-			h.logger.Error("cancelled transaction without its cancel",
+			handler.logger.Error("cancelled transaction without its cancel",
 				"transaction_id", original.ID, "provider_transaction_id", original.ProviderTransactionID)
 			return fmt.Errorf("%w: the transaction is already cancelled", domain.ErrConflict)
 		}
