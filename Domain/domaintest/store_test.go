@@ -267,6 +267,64 @@ func TestFakeStoreTransactions_Update_WithUpdateTransactionErr_ReturnsIt(t *test
 
 // Bets
 
+// FindPendingBefore (the pending resolver's scan, across players)
+
+func TestFakeStoreFindPendingBefore_ReturnsOnlyPendingTransactions(t *testing.T) {
+	store := NewFakeStore()
+	pending := givenAPendingWithdrawUpdatedAt(t, 1, testUserID, testNow)
+	store.PutTransaction(pending)
+	store.PutTransaction(givenACompletedWithdraw(t, 2, testUserID, "prov-2"))
+	store.PutTransaction(givenAFailedWithdraw(t, 3, testUserID, "prov-3"))
+
+	result, err := store.FindPendingBefore(context.Background(), testNow.Add(time.Hour), 10)
+
+	assertTransactionList(t, result, err, pending)
+}
+
+func TestFakeStoreFindPendingBefore_SkipsTransactionsUpdatedAfterTheCutoff(t *testing.T) {
+	store := NewFakeStore()
+	atTheCutoff := givenAPendingWithdrawUpdatedAt(t, 1, testUserID, testNow)
+	store.PutTransaction(atTheCutoff)
+	store.PutTransaction(givenAPendingWithdrawUpdatedAt(t, 2, testUserID, testNow.Add(time.Second)))
+
+	result, err := store.FindPendingBefore(context.Background(), testNow, 10)
+
+	assertTransactionList(t, result, err, atTheCutoff)
+}
+
+func TestFakeStoreFindPendingBefore_ReturnsEveryPlayerOldestFirst(t *testing.T) {
+	store := NewFakeStore()
+	newer := givenAPendingWithdrawUpdatedAt(t, 1, testUserID, testNow)
+	older := givenAPendingWithdrawUpdatedAt(t, 2, anotherUserID, testNow.Add(-time.Minute))
+	store.PutTransaction(newer)
+	store.PutTransaction(older)
+
+	result, err := store.FindPendingBefore(context.Background(), testNow, 10)
+
+	assertTransactionList(t, result, err, older, newer)
+}
+
+func TestFakeStoreFindPendingBefore_ReturnsAtMostLimit(t *testing.T) {
+	store := NewFakeStore()
+	oldest := givenAPendingWithdrawUpdatedAt(t, 1, testUserID, testNow.Add(-2*time.Minute))
+	middle := givenAPendingWithdrawUpdatedAt(t, 2, testUserID, testNow.Add(-time.Minute))
+	store.PutTransaction(oldest)
+	store.PutTransaction(middle)
+	store.PutTransaction(givenAPendingWithdrawUpdatedAt(t, 3, testUserID, testNow))
+
+	result, err := store.FindPendingBefore(context.Background(), testNow, 2)
+
+	assertTransactionList(t, result, err, oldest, middle)
+}
+
+func TestFakeStoreFindPendingBefore_NothingPending_ReturnsAnEmptyList(t *testing.T) {
+	store := NewFakeStore()
+
+	result, err := store.FindPendingBefore(context.Background(), testNow, 10)
+
+	assertTransactionList(t, result, err)
+}
+
 func TestFakeStoreBets_NextID_ReturnsIncreasingIDs(t *testing.T) {
 	store := NewFakeStore()
 
@@ -380,6 +438,14 @@ func givenAPendingWithdraw(t *testing.T, n int, userID domain.UserID, providerID
 		CreatedAt:             testNow,
 		UpdatedAt:             testNow,
 	}
+}
+
+func givenAPendingWithdrawUpdatedAt(t *testing.T, n int, userID domain.UserID, updatedAt time.Time) domain.Transaction {
+	t.Helper()
+	tx := givenAPendingWithdraw(t, n, userID, fmt.Sprintf("prov-%d", n))
+	tx.CreatedAt = updatedAt
+	tx.UpdatedAt = updatedAt
+	return tx
 }
 
 func givenACompletedWithdraw(t *testing.T, n int, userID domain.UserID, providerID string) domain.Transaction {
@@ -627,6 +693,20 @@ func assertStoredTransactions(t *testing.T, store *FakeStore, err error, want ..
 	for i := range want {
 		if describeTransaction(result[i]) != describeTransaction(want[i]) {
 			t.Errorf("expected transaction\n  %s\ngot\n  %s", describeTransaction(want[i]), describeTransaction(result[i]))
+		}
+	}
+}
+
+// assertTransactionList checks a list returned by the store, in order.
+func assertTransactionList(t *testing.T, result []domain.Transaction, err error, want ...domain.Transaction) {
+	t.Helper()
+	assertNoError(t, err)
+	if len(result) != len(want) {
+		t.Fatalf("expected %d transactions, got %d: %+v", len(want), len(result), result)
+	}
+	for i := range want {
+		if describeTransaction(result[i]) != describeTransaction(want[i]) {
+			t.Errorf("expected transaction %d\n  %s\ngot\n  %s", i, describeTransaction(want[i]), describeTransaction(result[i]))
 		}
 	}
 }
