@@ -56,16 +56,24 @@ func run() error {
 		return err
 	}
 
-	server := newHTTPServer(cfg, NewRouter(logger, newHandlers(cfg, pool, logger)))
+	handlers, resolver := newHandlers(cfg, pool, logger)
+	server := newHTTPServer(cfg, NewRouter(logger, handlers))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The resolver stops with ctx (the shutdown signal). run waits for it
+	// before returning, so it never uses the database pool after it is closed.
+	resolverDone := runPendingResolver(ctx, resolver, cfg.PendingResolverInterval, logger)
+
 	serverErrors := startServer(server, logger)
-	if err := waitForShutdownSignal(ctx, serverErrors, logger); err != nil {
-		return err
+	err = waitForShutdownSignal(ctx, serverErrors, logger)
+	if err == nil {
+		err = shutdownServer(server, cfg.ShutdownTimeout, logger)
 	}
-	return shutdownServer(server, cfg.ShutdownTimeout, logger)
+	stop() // also when the server failed: the resolver must stop too
+	<-resolverDone
+	return err
 }
 
 func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
@@ -83,6 +91,7 @@ func setupLogging(cfg Config) *slog.Logger {
 		"wallet_operation_timeout", cfg.WalletOperationTimeout.String(),
 		"wallet_balance_timeout", cfg.WalletBalanceTimeout.String(),
 		"jwt_ttl", cfg.JWTTTL.String(),
+		"pending_resolver_interval", cfg.PendingResolverInterval.String(),
 	)
 	logger.Debug("debug logging enabled")
 	return logger
@@ -120,8 +129,9 @@ func migrateDatabase(pool *pgxpool.Pool, logger *slog.Logger) error {
 }
 
 // newHandlers is the dependency wiring: it builds each endpoint with its real
-// adapters. This is the only place that knows every concrete type.
-func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
+// adapters, and the pending resolver on the same withdraw, deposit and cancel
+// handlers. This is the only place that knows every concrete type.
+func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) (Handlers, *actions.ResolvePendingCommandHandler) {
 	players := persistence.NewPlayerRepository(pool)
 	walletClient := wallet.NewClient(wallet.Config{
 		BaseURL:          cfg.WalletBaseURL,
@@ -144,14 +154,17 @@ func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
 	withdraw := actions.NewWithdrawCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
 	deposit := actions.NewDepositCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
 	cancel := actions.NewCancelCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
+	resolver := actions.NewResolvePendingCommandHandler(
+		persistence.NewPendingTransactionFinder(pool), playerLocker, withdraw, deposit, cancel, systemClock, logger)
 
-	return Handlers{
+	handlers := Handlers{
 		Login:    application.NewLoginController(login, logger),
 		Player:   requireAuth(application.NewPlayerController(getPlayer, logger)),
 		Withdraw: requireAuth(application.NewWithdrawController(withdraw, logger)),
 		Deposit:  requireAuth(application.NewDepositController(deposit, logger)),
 		Cancel:   requireAuth(application.NewCancelController(cancel, logger)),
 	}
+	return handlers, resolver
 }
 
 func newHTTPServer(cfg Config, router http.Handler) *http.Server {

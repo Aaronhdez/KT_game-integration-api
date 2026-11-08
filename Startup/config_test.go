@@ -68,6 +68,11 @@ func TestLoadConfig_ValidValues_AreUsed(t *testing.T) {
 			adjust: func(want *Config) { want.JWTTTL = 15 * time.Minute },
 		},
 		{
+			name:   "custom pending resolver interval",
+			env:    map[string]string{"PENDING_RESOLVER_INTERVAL": "30s"},
+			adjust: func(want *Config) { want.PendingResolverInterval = 30 * time.Second },
+		},
+		{
 			name:   "JWT secret of exactly 32 bytes",
 			env:    map[string]string{"JWT_SECRET": "0123456789abcdef0123456789abcdef"},
 			adjust: func(want *Config) { want.JWTSecret = "0123456789abcdef0123456789abcdef" },
@@ -156,6 +161,14 @@ func TestLoadConfig_InvalidValues_ReturnError(t *testing.T) {
 			name: "zero JWT TTL",
 			env:  map[string]string{"JWT_TTL": "0s"},
 		},
+		{
+			name: "pending resolver interval without unit",
+			env:  map[string]string{"PENDING_RESOLVER_INTERVAL": "10"},
+		},
+		{
+			name: "zero pending resolver interval",
+			env:  map[string]string{"PENDING_RESOLVER_INTERVAL": "0s"},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -181,16 +194,17 @@ func TestLoadConfig_ShortJWTSecret_ErrorDoesNotRevealTheSecret(t *testing.T) {
 // variables are set (see setEnv).
 func expectedDefaultConfig() Config {
 	return Config{
-		HTTPPort:               8080,
-		LogLevel:               slog.LevelInfo,
-		ShutdownTimeout:        10 * time.Second,
-		DatabaseURL:            testDatabaseURL,
-		WalletBaseURL:          "http://wallet:8000",
-		WalletAPIKey:           testWalletAPIKey,
-		WalletOperationTimeout: 6 * time.Second,
-		WalletBalanceTimeout:   10 * time.Second,
-		JWTSecret:              testJWTSecret,
-		JWTTTL:                 time.Hour,
+		HTTPPort:                8080,
+		LogLevel:                slog.LevelInfo,
+		ShutdownTimeout:         10 * time.Second,
+		DatabaseURL:             testDatabaseURL,
+		WalletBaseURL:           "http://wallet:8000",
+		WalletAPIKey:            testWalletAPIKey,
+		WalletOperationTimeout:  6 * time.Second,
+		WalletBalanceTimeout:    10 * time.Second,
+		JWTSecret:               testJWTSecret,
+		JWTTTL:                  time.Hour,
+		PendingResolverInterval: 10 * time.Second,
 	}
 }
 
@@ -202,7 +216,7 @@ func setEnv(t *testing.T, env map[string]string) {
 	optional := []string{
 		"HTTP_PORT", "LOG_LEVEL", "SHUTDOWN_TIMEOUT",
 		"WALLET_BASE_URL", "WALLET_OPERATION_TIMEOUT", "WALLET_BALANCE_TIMEOUT",
-		"JWT_TTL",
+		"JWT_TTL", "PENDING_RESOLVER_INTERVAL",
 	}
 	for _, key := range optional {
 		t.Setenv(key, "")

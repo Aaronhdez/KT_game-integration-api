@@ -25,6 +25,8 @@ type Config struct {
 
 	JWTSecret string        // HMAC key that signs the tokens; secret: never log it
 	JWTTTL    time.Duration // lifetime of an issued token
+
+	PendingResolverInterval time.Duration // time between two runs of the pending resolver
 }
 
 const (
@@ -39,6 +41,10 @@ const (
 	defaultWalletBalanceTimeout   = "10s"
 
 	defaultJWTTTL = "1h"
+
+	// A PENDING transaction is re-sent at least 10 s after its last attempt
+	// (Actions, resendDelay), so checking every 10 s resolves it within ~20 s.
+	defaultPendingResolverInterval = "10s"
 	// RFC 7518 §3.2: an HS256 key must be at least 256 bits long.
 	minJWTSecretBytes = 32
 )
@@ -108,6 +114,12 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("JWT_TTL: %w", err)
 	}
 	cfg.JWTTTL = jwtTTL
+
+	resolverInterval, err := parsePositiveDuration(getEnv("PENDING_RESOLVER_INTERVAL", defaultPendingResolverInterval))
+	if err != nil {
+		return Config{}, fmt.Errorf("PENDING_RESOLVER_INTERVAL: %w", err)
+	}
+	cfg.PendingResolverInterval = resolverInterval
 
 	return cfg, nil
 }
