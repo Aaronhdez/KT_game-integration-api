@@ -1,0 +1,11 @@
+# Redocly CLI configuration for `redocly lint docs/openapi.yaml` (run in CI).
+extends:
+  - recommended
+
+rules:
+  # No license: this is an assessment project, not a published API.
+  info-license: off
+  # The service only runs locally (docker compose), so localhost is the real server.
+  no-server-example.com: off
+  # GET /health cannot fail with a 4xx: it has no input and needs no token.
+  operation-4xx-response: off
