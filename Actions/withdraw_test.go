@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +15,10 @@ import (
 	"github.com/aaronhdez/kt_game-integration-api/Domain/domaintest"
 )
 
-const testProviderID = "prov-tx-0001"
+const (
+	testProviderID               = "prov-tx-0001"
+	anotherUserID  domain.UserID = 34673635133
+)
 
 var errDatabaseDown = errors.New("database down")
 
@@ -365,6 +369,128 @@ func TestWithdraw_CallerLeavesDuringTheWalletCall_StillStoresTheOutcome(t *testi
 	assertStoredTransactions(t, fixture.store, nil, aCompletedWithdraw(t, "10.50", "4989.50"))
 }
 
+// Idempotency (§7.1, §7.2, §9.2): a replay never reaches the Wallet
+
+func TestWithdraw_SameRequestTwice_SecondIsAReplayOfTheCompletedTransaction(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, aCompletedWithdraw(t, "10.50", "4989.50"), betStatus(domain.BetPlaced))
+}
+
+func TestWithdraw_SameRequestTwice_CallsTheWalletOnlyForTheFirst(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), withdrawCall(t, "10.50"))
+}
+
+func TestWithdraw_SameRequestTwice_StoresOneTransactionAndOneBet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionAndBet(t, fixture.store, err, aCompletedWithdraw(t, "10.50", "4989.50"), aPlacedBet(t, "10.50"))
+}
+
+// §7.2: a replay "reflects the transaction's current state".
+func TestWithdraw_ReplayOfACompletedWithdraw_ReturnsTheBetsCurrentStatus(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aCompletedWithdraw(t, "10.50", "4989.50"))
+	fixture.store.PutBet(aBetWithStatus(t, "10.50", domain.BetWon))
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, aCompletedWithdraw(t, "10.50", "4989.50"), betStatus(domain.BetWon))
+}
+
+func TestWithdraw_ReplayOfACancelledWithdraw_ReturnsItsCurrentState(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aCancelledWithdraw(t, "10.50"))
+	fixture.store.PutBet(aBetWithStatus(t, "10.50", domain.BetCancelled))
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, aCancelledWithdraw(t, "10.50"), betStatus(domain.BetCancelled))
+}
+
+func TestWithdraw_ReplayOfAPendingWithdraw_ReturnsItPendingWithoutBetStatus(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aPendingWithdraw(t, "10.50"))
+
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, aPendingWithdraw(t, "10.50"), nil)
+}
+
+// Resolving a PENDING withdraw (re-sending it to the Wallet) is Phase 11.
+func TestWithdraw_ReplayOfAPendingWithdraw_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aPendingWithdraw(t, "10.50"))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
+func TestWithdraw_ReplayOfAFailedWithdraw_IsPreviousAttemptFailed(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+}
+
+func TestWithdraw_ReplayOfAFailedWithdraw_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
+func TestWithdraw_SameProviderIDWithAnotherAmount_IsIdempotencyConflict(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aCompletedWithdraw(t, "10.50", "4989.50"))
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "11.00"))
+
+	assertErrorIs(t, err, domain.ErrIdempotencyConflict)
+}
+
+func TestWithdraw_SameProviderIDWithAnotherAmount_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aCompletedWithdraw(t, "10.50", "4989.50"))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "11.00"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
+// §9.2: "including when two identical requests arrive at the same time".
+func TestWithdraw_ConcurrentIdenticalRequests_CallTheWalletWithdrawOnce(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	executeConcurrently(t, fixture.withdraw, aWithdrawCommand(t, "10.50"), 10)
+
+	assertWithdrawCalls(t, fixture.wallet, 1)
+}
+
+func TestWithdraw_ConcurrentIdenticalRequests_OneIsProcessedAndTheOthersAreReplays(t *testing.T) {
+	fixture := givenAWithdraw(t)
+
+	result := executeConcurrently(t, fixture.withdraw, aWithdrawCommand(t, "10.50"), 10)
+
+	assertProcessedAndReplayed(t, result, 1, 9)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // withdrawFixture keeps the fakes reachable, so a test can script or break one
@@ -493,9 +619,75 @@ func aFailedWithdraw(t *testing.T, amount string) domain.Transaction {
 	return tx
 }
 
+func aCancelledWithdraw(t *testing.T, amount string) domain.Transaction {
+	t.Helper()
+	tx := aCompletedWithdraw(t, amount, "4989.50")
+	tx.Status = domain.TransactionCancelled
+	return tx
+}
+
+// anotherPlayersWithdraw uses the same provider transaction ID as the test
+// commands, for another player.
+func anotherPlayersWithdraw(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := aCompletedWithdraw(t, "10.50", "31404.75")
+	tx.ID = domaintest.FakeTransactionID(99)
+	tx.UserID = anotherUserID
+	tx.BetID = 99
+	tx.OldBalance = givenAParsedMoney(t, "31415.25")
+	return tx
+}
+
+// aWithdrawStoredByAnotherInstance is the same request processed elsewhere:
+// same player, provider ID and amount, but its own transaction and bet IDs.
+func aWithdrawStoredByAnotherInstance(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := aCompletedWithdraw(t, "10.50", "4989.50")
+	tx.ID = domaintest.FakeTransactionID(50)
+	tx.BetID = 50
+	return tx
+}
+
+func aBetStoredByAnotherInstance(t *testing.T) domain.Bet {
+	t.Helper()
+	bet := aPlacedBet(t, "10.50")
+	bet.ID = 50
+	return bet
+}
+
 func aPlacedBet(t *testing.T, stake string) domain.Bet {
 	t.Helper()
 	return domain.NewPlacedBet(1, testUserID, domain.USD, givenAParsedMoney(t, stake), testNow)
+}
+
+func aBetWithStatus(t *testing.T, stake string, status domain.BetStatus) domain.Bet {
+	t.Helper()
+	bet := aPlacedBet(t, stake)
+	bet.Status = status
+	return bet
+}
+
+// executeConcurrently runs the same command from count goroutines at once and
+// returns every result. Each one must succeed.
+func executeConcurrently(t *testing.T, withdraw *WithdrawCommandHandler, command WithdrawCommand, count int) []TransactionResult {
+	t.Helper()
+	results := make([]TransactionResult, count)
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = withdraw.Execute(context.Background(), command)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: unexpected error: %v", i, err)
+		}
+	}
+	return results
 }
 
 func balanceCall() domaintest.Call {
@@ -556,7 +748,61 @@ func (wallet callerLeavingWallet) Withdraw(ctx context.Context, operation domain
 	return wallet.FakeWallet.Withdraw(ctx, operation)
 }
 
+// racingWallet stores an identical withdraw when the old balance is read,
+// i.e. after our idempotency lookup and before our insert, as if another
+// API instance had processed the same request at the same time.
+type racingWallet struct {
+	*domaintest.FakeWallet
+	store  *domaintest.FakeStore
+	stored domain.Transaction
+}
+
+func (wallet *racingWallet) Balance(ctx context.Context, userID domain.UserID) (domain.WalletBalance, error) {
+	wallet.store.PutTransaction(wallet.stored)
+	return wallet.FakeWallet.Balance(ctx, userID)
+}
+
 // Assertions
+
+func assertReplayOf(t *testing.T, result TransactionResult, err error, want domain.Transaction, wantBetStatus *domain.BetStatus) {
+	t.Helper()
+	assertResultTransaction(t, result, err, want)
+	assertBetStatusAndReplayed(t, result, err, wantBetStatus, true)
+}
+
+func assertStoredTransactionAndBet(t *testing.T, store *domaintest.FakeStore, err error, wantTransaction domain.Transaction, wantBet domain.Bet) {
+	t.Helper()
+	assertStoredTransactions(t, store, err, wantTransaction)
+	assertStoredBets(t, store, err, wantBet)
+}
+
+func assertWithdrawCalls(t *testing.T, wallet *domaintest.FakeWallet, want int) {
+	t.Helper()
+	withdraws := 0
+	for _, call := range wallet.Calls() {
+		if call.Method == "Withdraw" {
+			withdraws++
+		}
+	}
+	if withdraws != want {
+		t.Errorf("expected %d Wallet withdraw(s), got %d", want, withdraws)
+	}
+}
+
+func assertProcessedAndReplayed(t *testing.T, result []TransactionResult, wantProcessed, wantReplayed int) {
+	t.Helper()
+	processed, replayed := 0, 0
+	for _, r := range result {
+		if r.Replayed {
+			replayed++
+		} else {
+			processed++
+		}
+	}
+	if processed != wantProcessed || replayed != wantReplayed {
+		t.Errorf("expected %d processed and %d replayed, got %d and %d", wantProcessed, wantReplayed, processed, replayed)
+	}
+}
 
 func assertResultTransaction(t *testing.T, result TransactionResult, err error, want domain.Transaction) {
 	t.Helper()

@@ -88,6 +88,13 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 	providerID domain.ProviderTransactionID,
 	amount domain.Money,
 ) (TransactionResult, error) {
+	// A request already processed is answered from the database, without
+	// touching the Wallet (§7.1). Under the lock, so concurrent duplicates see
+	// the transaction stored by the first one.
+	if result, found, err := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
+		return result, err
+	}
+
 	balance, err := h.wallet.Balance(ctx, player.UserID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: read old balance: %v: %w", err, domain.ErrWalletFailure)
@@ -227,4 +234,56 @@ func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, ou
 		attributes = append(attributes, "error", cause.Error())
 	}
 	h.logger.Log(context.Background(), level, "withdraw", attributes...)
+}
+
+// replayIfProcessed looks for a transaction already stored for providerID.
+// found is false when there is none. When there is one, the stored result is
+// returned without any Wallet call (§7.1, §7.2):
+//   - another amount or currency → ErrIdempotencyConflict (409);
+//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - PENDING → the transaction, with no bet (202);
+//   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
+func (h *WithdrawCommandHandler) replayIfProcessed(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	userID domain.UserID,
+	providerID domain.ProviderTransactionID,
+	amount domain.Money,
+	currency domain.Currency,
+) (TransactionResult, bool, error) {
+	var result TransactionResult
+	found := false
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, providerID)
+		if errors.Is(err, domain.ErrTransactionNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+
+		if !previous.Amount.Equal(amount) || previous.Currency != currency {
+			return domain.ErrIdempotencyConflict
+		}
+
+		switch previous.Status {
+		case domain.TransactionFailed:
+			return domain.ErrPreviousAttemptFailed
+		case domain.TransactionPending:
+			result = TransactionResult{Transaction: previous, Replayed: true}
+			return nil
+		default:
+			bet, err := repos.Bets.FindByID(ctx, userID, previous.BetID)
+			if err != nil {
+				return err
+			}
+			result = TransactionResult{Transaction: previous, BetStatus: &bet.Status, Replayed: true}
+			return nil
+		}
+	})
+	if err != nil {
+		return TransactionResult{}, true, fmt.Errorf("withdraw: %w", err)
+	}
+	return result, found, nil
 }
