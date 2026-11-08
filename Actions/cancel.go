@@ -79,6 +79,10 @@ func (handler *CancelCommandHandler) cancelLocked(
 	// First: while a cancel is PENDING or FAILED its original is still
 	// COMPLETED, so DecideCancel alone would accept a second cancel.
 	if result, found, err := handler.replayIfCancelled(ctx, uow, player.UserID, providerID); found || err != nil {
+		if err == nil && result.Transaction.Status == domain.TransactionPending {
+			// A retry of a PENDING cancel re-sends it, if it is due.
+			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
+		}
 		return result, err
 	}
 
@@ -114,16 +118,78 @@ func (handler *CancelCommandHandler) cancelLocked(
 		return TransactionResult{}, fmt.Errorf("cancel: store pending: %w", err)
 	}
 
-	// The compensating operation: same bet, our cancel's ID as reference, so
-	// the Wallet sees a new movement and de-duplicates re-sends of this one.
-	newBalance, walletErr := handler.sendCompensation(ctx, target.decision.Action, domain.WalletOperation{
-		UserID:    player.UserID,
-		Currency:  target.original.Currency,
-		Amount:    target.decision.Amount,
-		BetID:     target.bet.ID,
-		Reference: pending.ID,
-	})
+	// The compensating operation: same bet and amount as the original (copied
+	// by NewCancel), our cancel's ID as reference, so the Wallet sees a new
+	// movement and de-duplicates re-sends of this one.
+	newBalance, walletErr := handler.sendCompensation(ctx, target.decision.Action, walletOperationOf(pending))
+	return handler.finish(ctx, uow, pending, target, newBalance, walletErr)
+}
 
+// resendPending sends a PENDING cancel's compensating operation to the Wallet
+// again, the same request as its first attempt, and stores the outcome with
+// the same rules (finish). Nothing is sent if it is not due (see
+// startResend); the result is then the cancel as stored, with its bet's
+// status. The caller holds the player's lock.
+//
+// While the cancel is PENDING its original stays COMPLETED and the bet
+// unchanged: a second cancel gets this one (replayIfCancelled) and a deposit
+// on the withdraw is refused (checkNoCancelInProgress).
+func (handler *CancelCommandHandler) resendPending(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction) (TransactionResult, error) {
+	var (
+		current domain.Transaction
+		target  cancelTarget
+		due     bool
+	)
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		var err error
+		current, due, err = handler.startResend(ctx, repos, pending)
+		if err != nil {
+			return err
+		}
+		original, err := repos.Transactions.FindByID(ctx, current.UserID, current.CancelledTransactionID)
+		if err != nil {
+			return err
+		}
+		bet, err := repos.Bets.FindByID(ctx, current.UserID, original.BetID)
+		if err != nil {
+			return err
+		}
+		target = cancelTarget{original: original, bet: bet, decision: decisionOfPendingCancel(original, current)}
+		return nil
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("cancel: resend: %w", err)
+	}
+	if !due {
+		return TransactionResult{Transaction: current, BetStatus: &target.bet.Status}, nil
+	}
+
+	newBalance, walletErr := handler.sendCompensation(ctx, target.decision.Action, walletOperationOf(current))
+	return handler.finish(ctx, uow, current, target, newBalance, walletErr)
+}
+
+// decisionOfPendingCancel is the decision taken when the cancel was accepted:
+// a withdraw is credited back and a deposit debited back, by the amount the
+// cancel copied from it. A re-send repeats that decision; it does not run
+// DecideCancel again. (A zero-amount deposit's cancel never calls the Wallet,
+// so it is never PENDING.)
+func decisionOfPendingCancel(original, cancel domain.Transaction) domain.CancelDecision {
+	if original.Type == domain.TransactionWithdraw {
+		return domain.CancelDecision{Action: domain.CancelCreditBack, Amount: cancel.Amount}
+	}
+	return domain.CancelDecision{Action: domain.CancelDebitBack, Amount: cancel.Amount}
+}
+
+// finish stores what the Wallet's answer means for the pending cancel, the
+// original and its bet and returns the result.
+func (handler *CancelCommandHandler) finish(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	pending domain.Transaction,
+	target cancelTarget,
+	newBalance domain.Money,
+	walletErr error,
+) (TransactionResult, error) {
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
@@ -150,7 +216,7 @@ func (handler *CancelCommandHandler) cancelLocked(
 // providerID. found is false when the transaction or its cancel does not exist;
 // findWhatToRevertthen reports an unknown transaction. When there is a cancel,
 // its stored result is returned without any Wallet call:
-//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
 //   - otherwise (PENDING, COMPLETED) → its current state and its bet's
 //     (202 or 200).
 //
@@ -182,7 +248,7 @@ func (handler *CancelCommandHandler) replayIfCancelled(
 		found = true
 
 		if previous.Status == domain.TransactionFailed {
-			return domain.ErrPreviousAttemptFailed
+			return previous.FailureError()
 		}
 		bet, err := repos.Bets.FindByID(ctx, userID, original.BetID)
 		if err != nil {

@@ -149,6 +149,16 @@ func TestCancelController_DebitBackWithInsufficientFunds_Returns422InsufficientF
 	assertStatusAndCode(t, recorder, http.StatusUnprocessableEntity, CodeInsufficientFunds)
 }
 
+// §7.1: a retry of a FAILED cancel gets the same answer as the first attempt.
+func TestCancelController_RetryOfACancelWithInsufficientFunds_Returns422InsufficientFunds(t *testing.T) {
+	fixture := givenACancelControllerWithAWonBet(t, "25.00")
+	fixture.postAs(testUserID, cancelDepositBody)
+
+	recorder := fixture.postAs(testUserID, cancelDepositBody)
+
+	assertStatusAndCode(t, recorder, http.StatusUnprocessableEntity, CodeInsufficientFunds)
+}
+
 func TestCancelController_WalletRejects_Returns502WalletError(t *testing.T) {
 	fixture := givenACancelController(t)
 	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)

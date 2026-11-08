@@ -1,6 +1,9 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // PlayerRepository reads the seeded player accounts. Both methods
 // return ErrPlayerNotFound when there is no such player.
@@ -46,6 +49,18 @@ type TransactionRepository interface {
 	FindCancelOf(ctx context.Context, userID UserID, originalID TransactionID) (Transaction, error)
 	FindActiveDeposit(ctx context.Context, userID UserID, betID BetID) (Transaction, error)
 	Update(ctx context.Context, tx Transaction) error
+}
+
+// PendingTransactionFinder lists the PENDING transactions of every player
+// whose last Wallet attempt started at or before updatedBefore (their
+// UpdatedAt), oldest first, at most limit of them. An empty list is not an
+// error.
+//
+// Unlike the repositories, it is not scoped by player: the pending resolver
+// does not know the player until it has found the transaction. It is only
+// used by that system process, never with a player's input.
+type PendingTransactionFinder interface {
+	FindPendingBefore(ctx context.Context, updatedBefore time.Time, limit int) ([]Transaction, error)
 }
 
 // Repositories groups the repositories that take part in one database

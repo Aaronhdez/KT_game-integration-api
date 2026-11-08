@@ -8,22 +8,84 @@
 | Situation | Behaviour | Why |
 |---|---|---|
 | Wallet returns an error **before** applying the operation | Only a *definitive* rejection counts as "not applied": `400 InsufficientBalance` → `FAILED`, `422 INSUFFICIENT_FUNDS`; any other `400` or a `401` → `FAILED`, `502 WALLET_ERROR`, logged at `error` (it means a bug on our side or a wrong `WALLET_API_KEY`). The client classifies by HTTP status **and** body `code`; anything it does not recognise is *unknown*, never `FAILED`. A withdraw keeps its transaction as `FAILED` (for audit) and creates no bet; a deposit keeps it as `FAILED` and leaves its bet `PLACED`, so the bet can still be settled; a cancel keeps it as `FAILED` and leaves the original and its bet unchanged (§8.5: "if funds are insufficient, nothing changes"). | Insufficient funds and validation errors are both `400`; only `code` tells them apart (findings Q3–Q5). A wrong `FAILED` cannot be undone, a `PENDING` can be resolved. |
-| Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. A withdraw answers `202` with `status: PENDING` and `newBalance`/`betStatus` `null`; a deposit answers `202` with `newBalance` `null` and `betStatus: PLACED` (the bet exists and is not settled until the deposit is confirmed); a cancel answers `202` with the original still `COMPLETED` and the bet unchanged. It is resolved by re-sending the identical request: `409 DuplicatedTransaction` means it had been applied. *Resolution: 11.* | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
-| Wallet times out | **Operations:** each call is bounded by `WALLET_OPERATION_TIMEOUT` (6 s). No answer in time is *unknown* → `PENDING`, `202`. The client never re-sends an operation by itself. **Balance reads:** `WALLET_BALANCE_TIMEOUT` (10 s) per attempt, one retry after 200 ms on a timeout, a network error or a `5xx`; the read then fails with `504 WALLET_TIMEOUT` or `502 WALLET_ERROR`. Worst case ≈ 20 s, still bounded. A withdraw or deposit reads the balance first (its `oldBalance`): if that read fails or times out, nothing has been sent, so it is a `502` (never `504`, which §7.3 reserves for reads) and nothing is stored. Their worst case is ≈ 20 s + 6 s ≈ 27 s, under the server's 30 s write timeout. | The Wallet never answers a POST after ~5 s but a balance read can take ~15 s (findings Q7); one shared 3 s timeout would have turned a third of successful operations into `PENDING`. A read is safe to repeat; an operation re-sent immediately could race the original (Q8), so re-sending is left to the resolution of Phase 11. |
-| Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. The outcome is written with a context that is not cancelled with the request (bounded by 5 s), so a provider hanging up does not leave an applied withdraw or deposit unrecorded; if the write itself fails, the transaction stays `PENDING` and the API answers `202`. *Resolution: 11.* | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
-| Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, and the idempotency lookup runs inside it, before any Wallet call: a retry sees the first request's transaction. Same provider ID and payload → the stored result (`200`, or `202` while `PENDING`), without calling the Wallet; another amount → `409`. A cancel's key is the cancelled transaction, so a repeated cancel returns the first one. The unique indexes on `provider_transaction_id`, on "one active deposit per bet" and on "one cancel per transaction" are the safety net if two requests ever race past the lock (e.g. two API instances): the insert fails and the lookup runs again. Tested with 10 simultaneous identical requests → one Wallet call (withdraw, deposit and cancel), and with 10 simultaneous deposits on one bet → one Wallet call, nine `409`. | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
-| Wallet restarts and loses its state | Not detected. After a restart the Wallet is back at its seeded balances and has forgotten which requests it applied, so re-sending a `PENDING` request would apply it again. Accepted risk. *Mitigations, if any: 11.* | The Wallet keeps everything in memory and has no endpoint to query past transactions (findings Q1, Q10). In this setup it only restarts on purpose, and the documented reset (`docker compose down -v`) also wipes our database. |
+| Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. A withdraw answers `202` with `status: PENDING` and `newBalance`/`betStatus` `null`; a deposit answers `202` with `newBalance` `null` and `betStatus: PLACED` (the bet exists and is not settled until the deposit is confirmed); a cancel answers `202` with the original still `COMPLETED` and the bet unchanged. It is resolved by re-sending the identical request (§2): `409 DuplicatedTransaction` means it had been applied. | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
+| Wallet times out | **Operations:** each call is bounded by `WALLET_OPERATION_TIMEOUT` (6 s). No answer in time is *unknown* → `PENDING`, `202`. The client never re-sends an operation by itself. **Balance reads:** `WALLET_BALANCE_TIMEOUT` (10 s) per attempt, one retry after 200 ms on a timeout, a network error or a `5xx`; the read then fails with `504 WALLET_TIMEOUT` or `502 WALLET_ERROR`. Worst case ≈ 20 s, still bounded. A withdraw or deposit reads the balance first (its `oldBalance`): if that read fails or times out, nothing has been sent, so it is a `502` (never `504`, which §7.3 reserves for reads) and nothing is stored. Their worst case is ≈ 20 s + 6 s ≈ 27 s, under the server's 30 s write timeout. | The Wallet never answers a POST after ~5 s but a balance read can take ~15 s (findings Q7); one shared 3 s timeout would have turned a third of successful operations into `PENDING`. A read is safe to repeat; an operation re-sent immediately could race the original (Q8), so re-sending waits 10 s after the last attempt (§2). |
+| Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. The outcome is written with a context that is not cancelled with the request (bounded by 5 s), so a provider hanging up does not leave an applied withdraw or deposit unrecorded; if the write itself fails, the transaction stays `PENDING` and the API answers `202`. The resolver runs once at startup, so whatever a crash left `PENDING` is re-sent straight away (§2). | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
+| Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, and the idempotency lookup runs inside it, before any Wallet call: a retry sees the first request's transaction. Same provider ID and payload → the stored result (`200`; for a `FAILED` one its `422`/`502`, §3), without calling the Wallet, except a `PENDING` one whose last attempt is at least 10 s old, which is re-sent (§2); another amount → `409`. A cancel's key is the cancelled transaction, so a repeated cancel returns the first one. The unique indexes on `provider_transaction_id`, on "one active deposit per bet" and on "one cancel per transaction" are the safety net if two requests ever race past the lock (e.g. two API instances): the insert fails and the lookup runs again. Tested with 10 simultaneous identical requests → one Wallet call (withdraw, deposit and cancel), and with 10 simultaneous deposits on one bet → one Wallet call, nine `409`. | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
+| Wallet restarts and loses its state | Not detected. After a restart the Wallet is back at its seeded balances and has forgotten which requests it applied, so re-sending a `PENDING` request would apply it again. Accepted risk, and the resolver (§2) makes it concrete: a transaction left `PENDING` across a Wallet restart is applied by the restarted Wallet when it is re-sent. No mitigation is possible from our side. | The Wallet keeps everything in memory and has no endpoint to query past transactions (findings Q1, Q10). In this setup it only restarts on purpose, and the documented reset (`docker compose down -v`) also wipes our database. |
 
 ## 2. How a PENDING transaction gets resolved
 
-*TBD (11).*
+**By re-sending the identical Wallet request.** Everything needed was stored
+before the first call (intent-first): user, currency, amount, `betId`, and our
+transaction ID as `reference`. The Wallet de-duplicates by that reference
+(findings Q8), so a re-send is never applied twice and its answer tells us
+what happened: `409 DuplicatedTransaction` → it had been applied →
+`COMPLETED`; `2xx` → it had not, and is applied now → `COMPLETED`; a
+definitive rejection → `FAILED` (with its reason, §3); anything else → still
+`PENDING`. The outcome goes through the same code as a first attempt
+(`finish`), so the rules (§1) are written once. A cancel re-sends the same
+compensation (credit back for a withdraw, debit back for a deposit): the
+decision taken when it was accepted is repeated, not decided again.
+
+**Two triggers, one path.** (1) The provider **retries** the same request:
+instead of a plain `202`, the retry re-sends and answers the final result
+(`200`, `422`/`502`, or `202` if still unknown). (2) A **background resolver**
+started by `Startup` scans the `PENDING` transactions of every player once at
+startup and then every `PENDING_RESOLVER_INTERVAL` (10 s), oldest first, 100
+per run, so a transaction whose provider never retries does not stay
+`PENDING` forever (e.g. a withdraw that took the money but has no bet). Both
+take the player's lock and re-read the transaction before re-sending, so they
+never re-send it twice; tested with a retry and the resolver at the same time,
+and with 10 simultaneous retries → one re-send.
+
+**Never while the last attempt may still be running.** A re-send that reached
+the Wallet while the previous attempt was still being processed could be
+applied twice (Q8): the Wallet never answers a POST after ~5 s but finishes
+slow ones at ~5.7 s, and our timeout is 6 s. So a transaction is re-sent only
+if its last attempt **started at least 10 s ago**. The start of the last
+attempt is the transaction's `updated_at`, written and committed *before* each
+re-send, so the rule holds across triggers, instances and crashes. Earlier,
+a retry gets `202` without a Wallet call.
+
+**`newBalance` of a resolved transaction:** the balance the Wallet reports on
+a `2xx` (it was applied now, so this is the true balance after it, even if
+other operations ran meanwhile); `oldBalance ± amount` on a `409`, which
+reports no balance (the balance right after the first attempt, when the
+Wallet most likely applied it).
+
+**No cap on re-sends.** While the Wallet keeps its memory a re-send is safe,
+and giving up would leave the transaction wrong forever. A transaction still
+unknown 5 minutes after it was created is logged at `error` level
+(`pending_overdue`) on every new attempt: that is the operator's signal (e.g.
+the Wallet keeps answering `500`). The one case a re-send cannot handle is a
+Wallet restart (§1, last row).
+
+*Measured against the mock:* 12 withdraws → 3 `202`, all three resolved by the
+resolver within ~20 s (the Wallet answered `409`: they had been applied); the
+API killed right after a `202` → the transaction was resolved by the run at
+the next startup.
+
+*Rejected:* marking old `PENDING` transactions `FAILED` (most of them were
+applied); comparing balances (meaningless once other operations ran, Q1);
+re-sending immediately on a retry (the race of Q8); only one trigger (a retry
+alone leaves silent providers `PENDING`; the resolver alone makes a retry wait
+up to an interval for an answer it could get now).
 
 ## 3. Retry of a request whose previous attempt ended FAILED
 
-*Interim (Phase 08), final decision in Phase 11:* the retry gets
-`409 CONFLICT` ("previous attempt failed") and the Wallet is not called. The
-provider transaction ID is already used by a transaction that did not succeed;
-repeating the original `422`/`502` would need its reason, which is not stored.
+**The retry gets the same error as the first attempt, without calling the
+Wallet:** `422 INSUFFICIENT_FUNDS` or `502 WALLET_ERROR`. A `FAILED`
+transaction stores why (`failure_reason`, migration `00006`), so the answer
+can be repeated: same key, same result (§7.1). The provider transaction ID
+stays used: a `FAILED` attempt was a definitive answer, and a provider that
+wants to try again sends a new request with a new ID. Rows that failed before
+the reason was stored answer `409 CONFLICT` ("previous attempt failed"), the
+policy from Phase 08 to 10. *Rejected:* keeping that `409` for every retry (a
+different answer than the first time); allowing a new attempt with the same
+ID (it would need the unique indexes relaxed and several cancels per
+transaction, and a withdraw retried later could succeed against a game state
+that has moved on).
 
 ## 4. Zero-amount deposits
 
@@ -182,7 +244,7 @@ another definitive rejection → `FAILED`, `502`; anything else stays `PENDING`
 (`202`). One log line per withdraw with the transaction and provider IDs, the
 bet ID, the amount and the outcome. Measured against the mock (10 withdraws):
 6 × `201`, 3 × `202`, 1 × `502` (balance read failed twice); the three
-`PENDING` ones had been applied by the Wallet, so resolving them (Phase 11) is
+`PENDING` ones had been applied by the Wallet, so resolving them (§2) is
 a normal path, not an edge case.
 
 **Deposit (Phase 09).** Same path as the withdraw, plus the rules of §8.4.
@@ -211,8 +273,8 @@ compensating operation with the same `betId` and the cancel's own ID as
 `reference`: a withdraw is credited back with a Wallet deposit, a deposit is
 debited back with a Wallet withdraw. It follows the same path as the other
 operations: under the player's lock, the cancel of the original is looked up
-first (the idempotency key, §7.1: `COMPLETED` → `200`, `PENDING` → `202`,
-`FAILED` → `409`); this must come before the §8.5 table, because while a
+first (the idempotency key, §7.1: `COMPLETED` → `200`, `PENDING` → re-sent if due (§2),
+`FAILED` → its `422`/`502` (§3)); this must come before the §8.5 table, because while a
 cancel is `PENDING` or `FAILED` its original is still `COMPLETED` and the table
 alone would accept a second one. Then `DecideCancel` → balance read → `PENDING`
 cancel committed → Wallet → outcome: applied → the cancel `COMPLETED`, the

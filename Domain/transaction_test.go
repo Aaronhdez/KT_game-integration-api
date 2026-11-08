@@ -112,17 +112,108 @@ func TestTransaction_CompleteFailed_ReturnsInvalidTransition(t *testing.T) {
 func TestTransaction_FailPending_IsFailed(t *testing.T) {
 	result := givenAPendingWithdraw(t)
 
-	err := result.Fail(testLater)
+	err := result.Fail(FailureWalletRejected, testLater)
 
 	assertTransactionTransitionTo(t, result, err, TransactionFailed)
+}
+
+func TestTransaction_FailPending_StoresTheReason(t *testing.T) {
+	testCases := []struct {
+		name   string
+		reason FailureReason
+	}{
+		{name: "insufficient funds", reason: FailureInsufficientFunds},
+		{name: "wallet rejected", reason: FailureWalletRejected},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := givenAPendingWithdraw(t)
+
+			_ = result.Fail(testCase.reason, testLater)
+
+			assertFailureReason(t, result, testCase.reason)
+		})
+	}
+}
+
+func TestTransaction_FailWithUnknownReason_ReturnsError(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	err := result.Fail("SOMETHING_ELSE", testLater)
+
+	assertTrue(t, err != nil, "an unknown failure reason should be refused")
+}
+
+func TestTransaction_FailWithUnknownReason_KeepsPending(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	_ = result.Fail("SOMETHING_ELSE", testLater)
+
+	assertTransactionStatus(t, result, TransactionPending)
 }
 
 func TestTransaction_FailCompleted_ReturnsInvalidTransition(t *testing.T) {
 	result := givenACompletedWithdraw(t)
 
-	err := result.Fail(testLater)
+	err := result.Fail(FailureWalletRejected, testLater)
 
 	assertErrorIs(t, err, ErrInvalidTransition)
+}
+
+// ----- RecordAttempt (the Wallet is called again for a PENDING one) -----
+
+func TestTransaction_RecordAttemptPending_MovesUpdatedAt(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	_ = result.RecordAttempt(testLater)
+
+	assertTrue(t, result.UpdatedAt.Equal(testLater), "UpdatedAt should be the time of the new attempt")
+}
+
+func TestTransaction_RecordAttemptPending_KeepsItPending(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	err := result.RecordAttempt(testLater)
+
+	assertTransactionTransitionTo(t, result, err, TransactionPending)
+}
+
+func TestTransaction_RecordAttemptCompleted_ReturnsInvalidTransition(t *testing.T) {
+	result := givenACompletedWithdraw(t)
+
+	err := result.RecordAttempt(testLater)
+
+	assertErrorIs(t, err, ErrInvalidTransition)
+}
+
+// ----- FailureError (what a retry of a FAILED transaction gets) -----
+
+func TestTransaction_FailureError_IsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   FailureReason
+		expected error
+	}{
+		{name: "insufficient funds", reason: FailureInsufficientFunds, expected: ErrInsufficientFunds},
+		{name: "wallet rejected", reason: FailureWalletRejected, expected: ErrWalletRejected},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx := givenAFailedWithdrawBecause(t, testCase.reason)
+
+			result := tx.FailureError()
+
+			assertErrorIs(t, result, testCase.expected)
+		})
+	}
+}
+
+func TestTransaction_FailureErrorWithoutReason_IsPreviousAttemptFailed(t *testing.T) {
+	tx := givenAFailedWithdrawWithoutReason(t)
+
+	result := tx.FailureError()
+
+	assertErrorIs(t, result, ErrPreviousAttemptFailed)
 }
 
 // ----- MarkCancelled (reverted by a Cancel) -----
@@ -216,8 +307,22 @@ func givenACompletedWithdraw(t *testing.T) *Transaction {
 
 func givenAFailedWithdraw(t *testing.T) *Transaction {
 	t.Helper()
+	return givenAFailedWithdrawBecause(t, FailureWalletRejected)
+}
+
+func givenAFailedWithdrawBecause(t *testing.T, reason FailureReason) *Transaction {
+	t.Helper()
 	tx := givenAPendingWithdraw(t)
-	givenTransactionStepSucceeds(t, tx.Fail(testNow), "fail withdraw")
+	givenTransactionStepSucceeds(t, tx.Fail(reason, testNow), "fail withdraw")
+	return tx
+}
+
+// givenAFailedWithdrawWithoutReason is a row that failed before failure
+// reasons were stored.
+func givenAFailedWithdrawWithoutReason(t *testing.T) *Transaction {
+	t.Helper()
+	tx := givenAFailedWithdraw(t)
+	tx.FailureReason = ""
 	return tx
 }
 
@@ -259,6 +364,13 @@ func assertTransactionStatus(t *testing.T, result *Transaction, expected Transac
 	t.Helper()
 	if result.Status != expected {
 		t.Errorf("expected transaction status %q, got %q", expected, result.Status)
+	}
+}
+
+func assertFailureReason(t *testing.T, result *Transaction, expected FailureReason) {
+	t.Helper()
+	if result.FailureReason != expected {
+		t.Errorf("expected failure reason %q, got %q", expected, result.FailureReason)
 	}
 }
 

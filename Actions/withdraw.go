@@ -80,6 +80,10 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	amount domain.Money,
 ) (TransactionResult, error) {
 	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
+		if err == nil && result.Transaction.Status == domain.TransactionPending {
+			// A retry of a PENDING withdraw re-sends it, if it is due.
+			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
+		}
 		return result, err
 	}
 
@@ -121,14 +125,42 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 
 	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
 	// it (docs/wallet-findings.md, Q8)
-	newBalance, walletErr := handler.wallet.Withdraw(ctx, domain.WalletOperation{
-		UserID:    player.UserID,
-		Currency:  player.Currency,
-		Amount:    amount,
-		BetID:     pending.BetID,
-		Reference: pending.ID,
-	})
+	newBalance, walletErr := handler.wallet.Withdraw(ctx, walletOperationOf(pending))
+	return handler.finish(ctx, uow, pending, newBalance, walletErr)
+}
 
+// resendPending sends a PENDING withdraw to the Wallet again, with the same
+// request as its first attempt, and stores the outcome with the same rules
+// (finish). Nothing is sent if it is not due (see startResend); the result is
+// then the transaction as stored. The caller holds the player's lock.
+func (handler *WithdrawCommandHandler) resendPending(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction) (TransactionResult, error) {
+	var current domain.Transaction
+	due := false
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		var err error
+		current, due, err = handler.startResend(ctx, repos, pending)
+		return err
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("withdraw: resend: %w", err)
+	}
+	if !due {
+		return TransactionResult{Transaction: current}, nil
+	}
+
+	newBalance, walletErr := handler.wallet.Withdraw(ctx, walletOperationOf(current))
+	return handler.finish(ctx, uow, current, newBalance, walletErr)
+}
+
+// finish stores what the Wallet's answer means for the pending withdraw
+// and returns the result.
+func (handler *WithdrawCommandHandler) finish(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	pending domain.Transaction,
+	newBalance domain.Money,
+	walletErr error,
+) (TransactionResult, error) {
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
@@ -136,8 +168,9 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, newBalance)
 	case walletAppliedBalanceUnknown:
-		// Exact: the old balance was read under the player's lock just before.
-		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(amount.Decimal()))
+		// The balance right after the first attempt: its old balance was read
+		// under the player's lock just before it.
+		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(pending.Amount.Decimal()))
 		if err != nil {
 			return handler.leavePending(pending, nil, "balance_unknown", err), nil
 		}
@@ -179,7 +212,7 @@ func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.
 // found is false when there is none. When there is one, the stored result is
 // returned without any Wallet call.
 //   - not a withdraw, or another amount or currency → ErrIdempotencyConflict (409);
-//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
 func (handler *WithdrawCommandHandler) replayIfProcessed(
@@ -209,7 +242,7 @@ func (handler *WithdrawCommandHandler) replayIfProcessed(
 
 		switch previous.Status {
 		case domain.TransactionFailed:
-			return domain.ErrPreviousAttemptFailed
+			return previous.FailureError()
 		case domain.TransactionPending:
 			result = TransactionResult{Transaction: previous, Replayed: true}
 			return nil

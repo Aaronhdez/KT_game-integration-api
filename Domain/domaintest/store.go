@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
@@ -38,8 +39,9 @@ type FakeStore struct {
 }
 
 var (
-	_ domain.PlayerLocker = (*FakeStore)(nil)
-	_ domain.UnitOfWork   = (*FakeStore)(nil)
+	_ domain.PlayerLocker             = (*FakeStore)(nil)
+	_ domain.UnitOfWork               = (*FakeStore)(nil)
+	_ domain.PendingTransactionFinder = (*FakeStore)(nil)
 )
 
 // storeState is the committed data. Atomic works on a copy of it.
@@ -143,6 +145,32 @@ func (store *FakeStore) Transactions() []domain.Transaction {
 	return slices.SortedFunc(maps.Values(store.state.transactions), func(a, b domain.Transaction) int {
 		return cmp.Compare(a.ID, b.ID)
 	})
+}
+
+// FindPendingBefore implements domain.PendingTransactionFinder with the same
+// rules as the PostgreSQL query: PENDING only, UpdatedAt at or before the
+// cutoff, every player, oldest first (then by ID), at most limit.
+func (store *FakeStore) FindPendingBefore(ctx context.Context, updatedBefore time.Time, limit int) ([]domain.Transaction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("fake store: find pending: %w", err)
+	}
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	pending := []domain.Transaction{}
+	for _, tx := range store.state.transactions {
+		if tx.Status == domain.TransactionPending && !tx.UpdatedAt.After(updatedBefore) {
+			pending = append(pending, tx)
+		}
+	}
+	slices.SortFunc(pending, func(a, b domain.Transaction) int {
+		return cmp.Or(a.UpdatedAt.Compare(b.UpdatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	if len(pending) > limit {
+		pending = pending[:limit]
+	}
+	return pending, nil
 }
 
 // Bets returns the committed bets ordered by ID.
@@ -252,6 +280,7 @@ func (repository *fakeTransactionRepository) Update(_ context.Context, tx domain
 		return domain.ErrTransactionNotFound
 	}
 	stored.Status = tx.Status
+	stored.FailureReason = tx.FailureReason
 	stored.NewBalance = tx.NewBalance
 	stored.UpdatedAt = tx.UpdatedAt
 	repository.state.transactions[tx.ID] = stored

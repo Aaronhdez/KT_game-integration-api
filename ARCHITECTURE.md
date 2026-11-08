@@ -24,7 +24,8 @@ project convention; **Go package names inside them are lowercase**
 │                   decision rules (§8.5), domain errors, and ports
 │                   (interfaces): PlayerRepository, BetRepository,
 │                   TransactionRepository, UnitOfWork, PlayerLocker,
-│                   WalletClient, Clock, IDGenerator, PasswordHasher, TokenIssuer.
+│                   PendingTransactionFinder, WalletClient, Clock,
+│                   IDGenerator, PasswordHasher, TokenIssuer.
 │   └── domaintest/ Test doubles shared by tests (fake Wallet, in-memory repos).
 ├── Persistence/    PostgreSQL (pgx) implementation of the repository ports,
 │                   per-player lock + unit of work, embedded SQL migrations
@@ -67,7 +68,9 @@ HTTP ─► Application.WithdrawHandler
           0. validate input (400) and find the player (404)
           1. lock player (per-player serialisation)
           2. idempotency lookup by providerTransactionId
-               same payload → replay (200 / 202) | different → CONFLICT (409)
+               same payload → replay (200; FAILED → its 422 / 502;
+                 PENDING → re-send if due, see "Pending resolution")
+               different → CONFLICT (409)
           3. read the balance from the Wallet (oldBalance)
           4. persist WITHDRAW as PENDING (+ reserved betId)   ← committed
           5. WalletClient.Withdraw (with timeout)
@@ -134,6 +137,8 @@ PlayerRepository (FindByUsername, FindByID)                          // standalo
   stays locked across the Wallet call. PostgreSQL releases it if the process dies.
 - **Reads are scoped by player:** every `Find…`/`Update` filters by
   `wallet_user_id`, so another player's bet or transaction is "not found".
+  The one exception is `PendingTransactionFinder` (Phase 11): the pending
+  resolver's scan, across players, never called with a player's input.
 - **Money** is written as text (`Money.String()`) and read as `amount::text` →
   `domain.ParseMoney`: exact both ways, and re-validated on every read.
 
@@ -303,7 +308,31 @@ reporting it. Embedding promotes the fields and methods (`handler.wallet`,
 `handler.fail(...)`); it is composition, not inheritance: `operation` knows
 nothing about the handler that contains it.
 
-### Naming convention
+## Pending resolution (Phase 11)
+
+A `PENDING` transaction is resolved by re-sending its identical Wallet request
+(same reference), from two triggers that share one method per handler:
+
+```
+provider retry ── …Locked: replay finds PENDING ──┐
+                                                  ├─► handler.resendPending(ctx, uow, tx)   (player locked)
+Startup goroutine (ticker) ─► ResolvePending ─────┘      startResend: re-read, due? RecordAttempt (committed)
+    .Execute: FindPendingBefore(now−10s, 100)            wallet call: walletOperationOf(tx)
+    → WithPlayerLock(user) → switch tx.Type              finish(…)    ← same as the first attempt
+```
+
+| Package / file | Content |
+|---|---|
+| `Domain/transaction.go` | `FailureReason` (`INSUFFICIENT_FUNDS`, `WALLET_REJECTED`), `Fail(reason, now)`, `FailureError()` (the error a retry of a `FAILED` gets), `RecordAttempt(now)` (`UpdatedAt` = start of the last attempt) |
+| `Domain/ports_persistence.go` | `PendingTransactionFinder.FindPendingBefore(ctx, updatedBefore, limit)` |
+| `Persistence/pending_transaction_finder.go` | Its SQL on the pool (no lock), using the partial index `transactions_pending` |
+| `Persistence/migrations/00006_pending_resolution.sql` | `failure_reason` column (only on `FAILED` rows) and the `transactions_pending` index |
+| `Actions/operation.go` | `resendDelay` (10 s), `overdueAfter` (5 min), `startResend`, `walletOperationOf` (first attempt and re-sends build the request the same way), `asReplay` (a retry is never a `201`); `leavePending` logs `pending_overdue` |
+| `Actions/withdraw.go`, `deposit.go`, `cancel.go` | `finish` (the outcome step, extracted from the first attempt), `resendPending`; cancel adds `decisionOfPendingCancel` (the direction comes from the stored original, `DecideCancel` is not run again) |
+| `Actions/resolve_pending.go` | `ResolvePendingCommandHandler`, `ResolveSummary` |
+| `Startup/resolver.go` | `runPendingResolver`: one run at start, then one per `PENDING_RESOLVER_INTERVAL`; stopped by the shutdown signal, and `run` waits for it before closing the pool |
+
+## Naming convention
 
 | Layer | Name | Example |
 |---|---|---|

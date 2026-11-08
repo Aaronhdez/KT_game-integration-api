@@ -150,7 +150,7 @@ func TestWithdraw_InsufficientFunds_KeepsAFailedTransactionAndCreatesNoBet(t *te
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "6000.00"))
 
-	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "6000.00"))
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "6000.00", domain.FailureInsufficientFunds))
 }
 
 func TestWithdraw_WalletRejects_IsWalletRejected(t *testing.T) {
@@ -168,7 +168,7 @@ func TestWithdraw_WalletRejects_KeepsAFailedTransactionAndCreatesNoBet(t *testin
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
-	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "10.50"))
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
 }
 
 // Validation (§7.3, §8.3): before any Wallet call
@@ -402,7 +402,8 @@ func TestWithdraw_ReplayOfAPendingWithdraw_ReturnsItPendingWithoutBetStatus(t *t
 	assertReplayOf(t, result, err, aPendingWithdraw(t, "10.50"), nil)
 }
 
-// Resolving a PENDING withdraw (re-sending it to the Wallet) is Phase 11.
+// Its last attempt started less than resendDelay ago: re-sending now could
+// race it inside the Wallet (findings Q8).
 func TestWithdraw_ReplayOfAPendingWithdraw_DoesNotCallTheWallet(t *testing.T) {
 	fixture := givenAWithdraw(t)
 	fixture.store.PutTransaction(aPendingWithdraw(t, "10.50"))
@@ -412,18 +413,185 @@ func TestWithdraw_ReplayOfAPendingWithdraw_DoesNotCallTheWallet(t *testing.T) {
 	assertWalletCalls(t, fixture.wallet)
 }
 
-func TestWithdraw_ReplayOfAFailedWithdraw_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenAWithdraw(t)
-	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+// Re-send on retry (§9.4): once resendDelay has passed since the last
+// attempt, a retry sends the identical request again and the Wallet's answer
+// resolves the PENDING withdraw.
 
-	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+func TestWithdraw_RetryJustBeforeTheResendDelay_DoesNotResend(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailAfterApply)
 
-	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+	fixture.withdrawAt(testNow.Add(resendDelay-time.Second)).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), withdrawCall(t, "10.50"))
+}
+
+func TestWithdraw_RetryAfterTheResendDelay_ResendsTheIdenticalRequest(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+
+	fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), withdrawCall(t, "10.50"), withdrawCall(t, "10.50"))
+}
+
+// The Wallet de-duplicates the re-send (409 → applied, balance unknown).
+func TestWithdraw_RetryOfAWithdrawTheWalletHadApplied_ReturnsItCompletedAsAReplay(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailAfterApply)
+
+	result, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, resentAt(aCompletedWithdraw(t, "10.50", "4989.50"), resendTime), betStatus(domain.BetPlaced))
+}
+
+func TestWithdraw_RetryOfAWithdrawTheWalletHadApplied_StoresItCompletedWithItsBet(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailAfterApply)
+
+	_, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionAndBet(t, fixture.store, err, resentAt(aCompletedWithdraw(t, "10.50", "4989.50"), resendTime), aPlacedBetAt(t, "10.50", resendTime))
+}
+
+func TestWithdraw_RetryOfAWithdrawTheWalletHadApplied_TakesTheMoneyOnlyOnce(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailAfterApply)
+
+	fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletBalance(t, fixture.wallet, "4989.50")
+}
+
+// The Wallet applies the re-send now, so the balance it reports is the true
+// one after it, even if other operations ran since the old balance was read.
+func TestWithdraw_RetryOfAWithdrawTheWalletHadNotApplied_CompletesWithTheBalanceTheWalletReports(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	givenThePlayerWonElsewhereMeanwhile(t, fixture.wallet, "100.00")
+
+	result, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertResultTransaction(t, result, err, resentAt(aCompletedWithdraw(t, "10.50", "5089.50"), resendTime))
+}
+
+func TestWithdraw_ResendRejected_IsWalletRejected(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.Reject)
+
+	_, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrWalletRejected)
+}
+
+func TestWithdraw_ResendRejected_StoresItFailedWithTheReason(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.Reject)
+
+	fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, resentAt(aFailedWithdraw(t, "10.50", domain.FailureWalletRejected), resendTime))
+}
+
+func TestWithdraw_ResendWithInsufficientFunds_IsInsufficientFunds(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	givenThePlayerSpentElsewhereMeanwhile(t, fixture.wallet, "4995.00")
+
+	_, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrInsufficientFunds)
+}
+
+func TestWithdraw_ResendOutcomeStillUnknown_ReturnsItPendingAsAReplay(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	result, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, resentAt(aPendingWithdraw(t, "10.50"), resendTime), nil)
+}
+
+// The next re-send waits resendDelay from this attempt, not from the first.
+func TestWithdraw_ResendOutcomeStillUnknown_StoresTheTimeOfTheNewAttempt(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, resentAt(aPendingWithdraw(t, "10.50"), resendTime))
+}
+
+// Intent first again: if the process stopped during the re-send, the next
+// one would still wait for it.
+func TestWithdraw_Resend_StoresTheNewAttemptBeforeCallingTheWallet(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	wallet := &storeObservingWallet{FakeWallet: fixture.wallet, store: fixture.store}
+
+	fixture.withdrawWithAt(wallet, resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertTransactionsSeenByTheWallet(t, wallet, resentAt(aPendingWithdraw(t, "10.50"), resendTime))
+}
+
+// Without a record of the new attempt, a later re-send could race it.
+func TestWithdraw_ResendAttemptCannotBeStored_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), withdrawCall(t, "10.50"))
+}
+
+func TestWithdraw_ResendAttemptCannotBeStored_ReturnsItsError(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	_, err := fixture.withdrawAt(resendTime).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, errDatabaseDown)
+}
+
+func TestWithdraw_StillUnknownAfterOverdueAfter_LogsPendingOverdueAsAnError(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	fixture.withdrawAt(testNow.Add(overdueAfter)).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertLogContains(t, fixture.logs, `"level":"ERROR"`, `"outcome":"pending_overdue"`)
+}
+
+// The lock serialises the retries. The first re-send leaves it unknown again,
+// but it recorded its attempt, so the other nine find it not due.
+func TestWithdraw_ConcurrentRetriesAfterTheResendDelay_ResendOnlyOnce(t *testing.T) {
+	fixture := givenAWithdrawLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	executeConcurrently(t, fixture.withdrawAt(resendTime), aWithdrawCommand(t, "10.50"), 10)
+
+	assertWithdrawCalls(t, fixture.wallet, 2)
+}
+
+// §7.1: same key, same result. A FAILED row without reason was stored
+// before migration 00006.
+func TestWithdraw_ReplayOfAFailedWithdraw_ReturnsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   domain.FailureReason
+		expected error
+	}{
+		{name: "insufficient funds", reason: domain.FailureInsufficientFunds, expected: domain.ErrInsufficientFunds},
+		{name: "wallet rejected", reason: domain.FailureWalletRejected, expected: domain.ErrWalletRejected},
+		{name: "no reason stored", reason: "", expected: domain.ErrPreviousAttemptFailed},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenAWithdraw(t)
+			fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", testCase.reason))
+
+			_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+			assertErrorIs(t, err, testCase.expected)
+		})
+	}
 }
 
 func TestWithdraw_ReplayOfAFailedWithdraw_DoesNotCallTheWallet(t *testing.T) {
 	fixture := givenAWithdraw(t)
-	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
@@ -572,14 +740,38 @@ func newWithdrawFixture(t *testing.T, players *domaintest.FakePlayerRepository, 
 
 // withdrawWith builds the handler with another Wallet (a wrapper of the fake).
 func (fixture withdrawFixture) withdrawWith(wallet domain.WalletClient) *WithdrawCommandHandler {
+	return fixture.withdrawWithAt(wallet, testNow)
+}
+
+// withdrawAt builds a handler whose clock says now, on the same store and
+// Wallet: a later request of the same provider.
+func (fixture withdrawFixture) withdrawAt(now time.Time) *WithdrawCommandHandler {
+	return fixture.withdrawWithAt(fixture.wallet, now)
+}
+
+func (fixture withdrawFixture) withdrawWithAt(wallet domain.WalletClient, now time.Time) *WithdrawCommandHandler {
 	return NewWithdrawCommandHandler(
 		fixture.players,
 		fixture.store,
 		wallet,
 		&domaintest.FakeIDGenerator{},
-		domaintest.FixedClock{Time: testNow},
+		domaintest.FixedClock{Time: now},
 		slog.New(slog.NewJSONHandler(fixture.logs, nil)),
 	)
+}
+
+// givenAWithdrawLeftPendingBy runs a first withdraw of 10.50 at testNow whose
+// Wallet call ends with behaviour (one of unknownOutcomes), so it is stored
+// PENDING.
+func givenAWithdrawLeftPendingBy(t *testing.T, behaviour domaintest.Behaviour) withdrawFixture {
+	t.Helper()
+	fixture := givenAWithdraw(t)
+	fixture.wallet.Next(domaintest.Succeed, behaviour)
+	result, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+	if err != nil || result.Transaction.Status != domain.TransactionPending {
+		t.Fatalf("arrange: expected a PENDING withdraw, got %+v, %v", result.Transaction, err)
+	}
+	return fixture
 }
 
 func aWithdrawCommand(t *testing.T, amount string) WithdrawCommand {
@@ -626,10 +818,11 @@ func aCompletedWithdraw(t *testing.T, amount, newBalance string) domain.Transact
 	return tx
 }
 
-func aFailedWithdraw(t *testing.T, amount string) domain.Transaction {
+func aFailedWithdraw(t *testing.T, amount string, reason domain.FailureReason) domain.Transaction {
 	t.Helper()
 	tx := aPendingWithdraw(t, amount)
 	tx.Status = domain.TransactionFailed
+	tx.FailureReason = reason
 	return tx
 }
 
@@ -681,7 +874,13 @@ func aBetStoredByAnotherInstance(t *testing.T) domain.Bet {
 
 func aPlacedBet(t *testing.T, stake string) domain.Bet {
 	t.Helper()
-	return domain.NewPlacedBet(1, testUserID, domain.USD, givenAParsedMoney(t, stake), testNow)
+	return aPlacedBetAt(t, stake, testNow)
+}
+
+// aPlacedBetAt is the bet created when the withdraw completed at createdAt.
+func aPlacedBetAt(t *testing.T, stake string, createdAt time.Time) domain.Bet {
+	t.Helper()
+	return domain.NewPlacedBet(1, testUserID, domain.USD, givenAParsedMoney(t, stake), createdAt)
 }
 
 func aBetWithStatus(t *testing.T, stake string, status domain.BetStatus) domain.Bet {

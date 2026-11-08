@@ -90,7 +90,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | 08 | `08-withdraw-endpoint.md` | `POST /api/v1/withdraw` (Action): validation, idempotency, intent-first, betId generation, outcomes 201/200/202/400/409/422/502. *(Provider transaction IDs made unique across the system (§6.1, migration `00005`); `oldBalance` read from the Wallet under the lock, its failure is a `502`, never `504`; idempotency by comparing the stored amount and currency, no payload hash; retry of a `FAILED` withdraw → `409` until Phase 11; transaction IDs from the standard library's `uuid`; in-memory store fakes in `domaintest`.)* | 05, 06 |
 | 09 | `09-deposit-endpoint.md` | `POST /api/v1/deposit`: link to withdraw, WON/LOST, single active settlement, zero-amount decision. *(Zero-amount deposits are not forwarded to the Wallet; a `PENDING` deposit answers `betStatus: PLACED`; idempotency compares amount, currency and bet; no migration (the active-settlement index of Phase 04); fix: a withdraw no longer replays a deposit's provider ID; shared helpers in `Actions/operation.go`.)* | 08 |
 | 10 | `10-cancel-endpoint.md` | `POST /api/v1/cancel`: every row of the table in section 8.5 via compensating transactions. *(Request `{providerTransactionId}` of the transaction to cancel; idempotency = its cancel, looked up before the §8.5 table; zero-amount deposit cancels not sent to the Wallet; new port method `FindActiveDeposit`: a withdraw with a `PENDING` deposit cannot be cancelled; fix: a deposit is refused while its withdraw has a cancel in progress; no migration. Followed by [`10b-actions-refactor.md`](10b-actions-refactor.md): the three operations embed a shared `operation` struct, and `classifyWalletResult` holds the §9.3 rule once.)* | 09 |
-| 11 | `11-pending-resolution.md` | Resolution on retry and/or background reconciler; FAILED-retry policy. | 08–10 |
+| 11 | `11-pending-resolution.md` | Resolution on retry and/or background reconciler; FAILED-retry policy. *(Both triggers: a provider retry and a background resolver in `Startup` (`PENDING_RESOLVER_INTERVAL`) re-send the identical Wallet request through one `resendPending` per handler, at least 10 s after the last attempt (`updated_at`, recorded before each re-send); a `FAILED` retry repeats its `422`/`502` (migration `00006`: `failure_reason`, partial index on `PENDING`); new port `PendingTransactionFinder`, the one read not scoped by player.)* | 08–10 |
 | 12 | `12-dockerization.md` | `Dockerfile`, `docker-compose.yml` (api + postgres + `kentechsp/wallet-client`), healthchecks, reset instructions (`docker compose down -v`). Consider letting the compose `postgres` service also serve the integration tests (separate `gameapi_test` database). | 02, 04 |
 | 13 | `13-docs-and-delivery.md` | Final `README.md`, `DESIGN.md` (all 5 required sections), OpenAPI spec, CI pipeline, last review. | all |
 | 14 | `14-nice-to-haves.md` *(optional)* | Cancel-before-withdraw, extra hardening, whatever time allows. | all |
@@ -174,11 +174,14 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 2. ~~Zero-amount deposit: forward to the Wallet or not?~~ **Resolved in
    Phase 09:** not forwarded (no money moves); the balance is still read for
    `oldBalance` → `DESIGN.md` §4.
-3. Retry after `FAILED`: return the stored failure (pure idempotency) or allow a
-   new attempt? (Decide in Phase 11; the assessment asks to document it.)
-   *Interim since Phase 08:* `409 CONFLICT` "previous attempt failed", no Wallet call.
-4. While a request is `PENDING` and the same key arrives again: re-try the
-   resolution, or just return 202? (Phase 11.)
+3. ~~Retry after `FAILED`: return the stored failure (pure idempotency) or allow a
+   new attempt?~~ **Resolved in Phase 11:** the stored failure — `422` or `502`,
+   as the first attempt, without calling the Wallet (reason stored by migration
+   `00006`) → `DESIGN.md` §3.
+4. ~~While a request is `PENDING` and the same key arrives again: re-try the
+   resolution, or just return 202?~~ **Resolved in Phase 11:** it re-sends the
+   identical request if its last attempt started at least 10 s ago, otherwise
+   `202` → `DESIGN.md` §2.
 5. ~~Usernames/passwords for the 4 seeded players (Phase 04).~~ **Resolved in
    Phase 04:** `player_usd`, `player_eur`, `player_kes`, `player_usd_2`, each
    with its own password, documented in `README.md`.

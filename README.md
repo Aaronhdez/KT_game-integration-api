@@ -117,6 +117,7 @@ An invalid value stops the service at startup with an error naming the variable.
 | `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` | Phase 05 |
 | `JWT_SECRET` | HMAC-SHA256 key that signs the JWTs (**required**, at least 32 bytes) | — | Phase 06 |
 | `JWT_TTL` | Token lifetime (Go duration) | `1h` | Phase 06 |
+| `PENDING_RESOLVER_INTERVAL` | How often `PENDING` transactions are re-sent to the Wallet in the background (see [Pending transactions](#pending-transactions)) | `10s` | Phase 11 |
 
 Variables of later phases are listed in advance; the service ignores them until
 the phase that reads them is implemented.
@@ -213,12 +214,12 @@ curl -i -X POST http://localhost:8080/api/v1/withdraw \
 | Status | When |
 |---|---|
 | `201` | Processed for the first time and `COMPLETED`; the bet is `PLACED` |
-| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet |
-| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":null` (resolution: Phase 11) |
+| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet; or a retry that [resolved](#pending-transactions) a `PENDING` withdraw |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":null`. It is [resolved](#pending-transactions) by a retry or in the background |
 | `400` | Missing or invalid field, amount not greater than zero, more than 2 decimals, or a currency that is not the player's |
-| `409` | Same `providerTransactionId` with another amount, an ID already used by another player, or a retry of a withdraw that ended `FAILED` |
-| `422` | Insufficient funds: the transaction is kept as `FAILED` and no bet is created |
-| `502` | The Wallet rejected the withdraw, or the balance before it could not be read (nothing was sent) |
+| `409` | Same `providerTransactionId` with another amount, or an ID already used by another player |
+| `422` | Insufficient funds: the transaction is kept as `FAILED` and no bet is created. A retry gets `422` again, without calling the Wallet |
+| `502` | The Wallet rejected the withdraw (a retry gets `502` again), or the balance before it could not be read (nothing was sent) |
 
 The player comes from the token, and `providerTransactionId` is the
 idempotency key. Expect a few seconds per call and roughly one `202` in four
@@ -246,12 +247,12 @@ amount greater than zero settles it as `WON`; `0` settles it as `LOST`, is
 | Status | When |
 |---|---|
 | `201` | Processed for the first time and `COMPLETED`; the bet is `WON` or `LOST` |
-| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet |
-| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":"PLACED"` (resolution: Phase 11) |
+| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet; or a retry that [resolved](#pending-transactions) a `PENDING` deposit |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":"PLACED"`. It is [resolved](#pending-transactions) by a retry or in the background |
 | `400` | Missing or invalid field (a missing `amount` is not `0`), negative amount, more than 2 decimals, or a currency that is not the player's / the withdraw's |
 | `404` | The referenced withdraw does not exist, belongs to another player, or is not a withdraw |
-| `409` | The withdraw is not `COMPLETED` or has a cancel in progress; the bet is already settled, cancelled or has another deposit in progress; same `providerTransactionId` with another payload or used by another player; or a retry of a deposit that ended `FAILED` |
-| `502` | The Wallet rejected the deposit, or the balance before it could not be read (nothing was sent) |
+| `409` | The withdraw is not `COMPLETED` or has a cancel in progress; the bet is already settled, cancelled or has another deposit in progress; or same `providerTransactionId` with another payload or used by another player |
+| `502` | The Wallet rejected the deposit (a retry gets `502` again), or the balance before it could not be read (nothing was sent) |
 
 ### Cancel
 
@@ -278,13 +279,34 @@ ID; `providerTransactionId` is the cancelled transaction's.
 | Status | When |
 |---|---|
 | `201` | Processed for the first time and `COMPLETED` |
-| `200` | The transaction was already cancelled: the earlier cancel in its current state, without calling the Wallet |
-| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `betStatus` unchanged (resolution: Phase 11); a retry also answers `202` |
+| `200` | The transaction was already cancelled: the earlier cancel in its current state, without calling the Wallet; or a retry that [resolved](#pending-transactions) a `PENDING` cancel |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `betStatus` unchanged. It is [resolved](#pending-transactions) by a retry or in the background |
 | `400` | Missing or invalid `providerTransactionId` |
 | `404` | The transaction does not exist or belongs to another player |
-| `409` | The transaction is `PENDING` or `FAILED`; a withdraw whose bet is settled (cancel the deposit first) or has a deposit in progress; or a retry of a cancel that ended `FAILED` |
-| `422` | Insufficient funds to take a deposit back: the cancel is kept as `FAILED`, nothing else changes |
-| `502` | The Wallet rejected the compensation, or the balance before it could not be read (nothing was sent) |
+| `409` | The transaction is `PENDING` or `FAILED`; or a withdraw whose bet is settled (cancel the deposit first) or has a deposit in progress |
+| `422` | Insufficient funds to take a deposit back: the cancel is kept as `FAILED`, nothing else changes. A retry gets `422` again, without calling the Wallet |
+| `502` | The Wallet rejected the compensation (a retry gets `502` again), or the balance before it could not be read (nothing was sent) |
+
+### Pending transactions
+
+A `202` means the Wallet may or may not have applied the operation (a `500`, a
+dropped connection or a timeout). The transaction stays `PENDING` until we
+know, and is resolved by **sending the identical request to the Wallet
+again**, which never applies it twice: the Wallet answers that it already has
+it (it had been applied) or applies it now. Two things trigger that re-send:
+
+- **A retry of the same request** by the provider. If the last attempt
+  started at least 10 s ago, the retry re-sends it and answers the final
+  result: `200` (completed), `422` / `502` (failed), or `202` again if the
+  Wallet's answer is still unknown. Before 10 s it answers `202` straight away.
+- **A background resolver**, run at startup and then every
+  `PENDING_RESOLVER_INTERVAL`, for providers that never retry. A `PENDING`
+  transaction is usually resolved within about 20 s.
+
+The 10 s wait avoids re-sending while the first attempt may still be running
+inside the Wallet. A transaction still unknown after 5 minutes is logged at
+`error` level (`"outcome":"pending_overdue"`) on every new attempt. Details
+in [`DESIGN.md`](DESIGN.md) §2.
 
 *More `curl` examples and OpenAPI spec: Phase 13.*
 

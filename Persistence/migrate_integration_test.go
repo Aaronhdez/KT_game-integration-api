@@ -59,6 +59,32 @@ func TestSchema_CancelWithoutCancelledTransaction_IsRejected(t *testing.T) {
 	assertCheckViolation(t, err)
 }
 
+func TestSchema_FailureReasonOnACompletedTransaction_IsRejected(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	insertTestPlayer(t, pool)
+
+	_, err := pool.Exec(testContext(t), `
+		INSERT INTO transactions (id, type, status, failure_reason, wallet_user_id, bet_id,
+			provider_transaction_id, amount, currency, old_balance, new_balance, created_at, updated_at)
+		VALUES (gen_random_uuid(), 'WITHDRAW', 'COMPLETED', 'INSUFFICIENT_FUNDS', $1, 1,
+			'completed-with-reason-' || gen_random_uuid(), 10, 'USD', 100, 90, now(), now())`, testPlayerID)
+
+	assertCheckViolation(t, err)
+}
+
+func TestSchema_UnknownFailureReason_IsRejected(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	insertTestPlayer(t, pool)
+
+	_, err := pool.Exec(testContext(t), `
+		INSERT INTO transactions (id, type, status, failure_reason, wallet_user_id, bet_id,
+			provider_transaction_id, amount, currency, old_balance, created_at, updated_at)
+		VALUES (gen_random_uuid(), 'WITHDRAW', 'FAILED', 'SOMETHING_ELSE', $1, 1,
+			'unknown-reason-' || gen_random_uuid(), 10, 'USD', 100, now(), now())`, testPlayerID)
+
+	assertCheckViolation(t, err)
+}
+
 func TestSchema_UnknownCurrency_IsRejected(t *testing.T) {
 	pool := migratedTestDatabase(t)
 

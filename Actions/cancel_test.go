@@ -250,7 +250,7 @@ func TestCancel_OfADepositWithInsufficientFunds_KeepsAFailedCancelAndChangesNoth
 
 	assertStoreHolds(t, fixture.store, storeContents{
 		transactions: []domain.Transaction{
-			theFailedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), "25.00"),
+			theFailedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), "25.00", domain.FailureInsufficientFunds),
 			theSettlingDeposit(t, domain.TransactionCompleted, "25.00"),
 			theWithdraw(t, domain.TransactionCompleted),
 		},
@@ -354,7 +354,7 @@ func TestCancel_WalletRejects_KeepsAFailedCancelAndTheWithdrawCompleted(t *testi
 
 	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
 
-	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, theFailedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet)))
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, theFailedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, domain.FailureWalletRejected)))
 }
 
 // Database failures around the Wallet call
@@ -610,7 +610,8 @@ func TestCancel_ZeroDepositCancelTwice_SecondIsAReplayWithoutWalletCalls(t *test
 	assertWalletCalls(t, fixture.wallet, balanceCall())
 }
 
-// Resolving a PENDING cancel (re-sending it to the Wallet) is Phase 11.
+// Its last attempt started less than resendDelay ago: re-sending now could
+// race it inside the Wallet (findings Q8).
 func TestCancel_ReplayOfAPendingCancel_ReturnsItPendingWithTheBetUnchanged(t *testing.T) {
 	stored := theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionPending))
 	fixture := givenACancelWithStore(t, stored)
@@ -629,13 +630,155 @@ func TestCancel_ReplayOfAPendingCancel_DoesNotCallTheWallet(t *testing.T) {
 	assertNoCancelWalletCallsAndStoreHolds(t, fixture, stored)
 }
 
-// Final FAILED-retry policy: Phase 11.
-func TestCancel_ReplayOfAFailedCancel_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenACancelWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed)))
+// Re-send on retry (§9.4): the compensating operation is sent again. The
+// rules shared with withdraw (the delay, the attempt recorded first, the
+// overdue log) are tested there.
 
-	_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+func TestCancel_RetryJustBeforeTheResendDelay_DoesNotResend(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailAfterApply)
 
-	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+	fixture.cancelAt(testNow.Add(resendDelay-time.Second)).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, testWithdrawnStake))
+}
+
+func TestCancel_RetryAfterTheResendDelay_ResendsTheIdenticalCompensation(t *testing.T) {
+	testCases := []struct {
+		name       string
+		fixture    func(t *testing.T) cancelFixture
+		providerID string
+		expected   domaintest.Call
+	}{
+		{"cancel of a withdraw: credit back", givenACancel, testProviderID, depositCall(t, testWithdrawnStake)},
+		{"cancel of a deposit: debit back", givenACancelOfTheDeposit, testDepositProviderID, debitBackCall(t, "25.00")},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenItsCancelLeftPendingBy(t, testCase.fixture(t), testCase.providerID, domaintest.FailBeforeApply)
+
+			fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testCase.providerID))
+
+			assertWalletCalls(t, fixture.wallet, balanceCall(), testCase.expected, testCase.expected)
+		})
+	}
+}
+
+// The Wallet de-duplicates the re-send (409 → applied, balance unknown).
+func TestCancel_RetryOfACreditBackTheWalletHadApplied_ReturnsTheCompletedCancelAsAReplay(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailAfterApply)
+
+	result, err := fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertReplayOf(t, result, err,
+		resentAt(theCompletedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, "5000.00"), resendTime),
+		betStatus(domain.BetCancelled))
+}
+
+func TestCancel_RetryOfACreditBackTheWalletHadApplied_StoresTheWithdrawAndItsBetCancelled(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailAfterApply)
+
+	fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{
+			resentAt(theCompletedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, "5000.00"), resendTime),
+			changedAt(theWithdraw(t, domain.TransactionCancelled), resendTime),
+		},
+		bets: []domain.Bet{theBetAt(t, domain.BetCancelled, resendTime)},
+	})
+}
+
+func TestCancel_RetryOfACreditBackTheWalletHadApplied_GivesTheStakeBackOnlyOnce(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailAfterApply)
+
+	fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertWalletBalance(t, fixture.wallet, "5000.00")
+}
+
+// The bet goes back to PLACED, so it can be settled again.
+func TestCancel_RetryOfADebitBackTheWalletHadApplied_StoresTheDepositCancelledAndTheBetPlaced(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancelOfTheDeposit(t), testDepositProviderID, domaintest.FailAfterApply)
+
+	fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{
+			resentAt(theCompletedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), testBalanceAfterWin, testBalanceAfterBet), resendTime),
+			changedAt(theSettlingDeposit(t, domain.TransactionCancelled, "25.00"), resendTime),
+			theWithdraw(t, domain.TransactionCompleted),
+		},
+		bets: []domain.Bet{theBetAt(t, domain.BetPlaced, resendTime)},
+	})
+}
+
+// §8.5: "if funds are insufficient, nothing changes" — but the cancel.
+func TestCancel_ResendOfADebitBackWithInsufficientFunds_IsInsufficientFunds(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancelOfTheDeposit(t), testDepositProviderID, domaintest.FailBeforeApply)
+	givenThePlayerSpentElsewhereMeanwhile(t, fixture.wallet, "5000.00")
+
+	_, err := fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertErrorIs(t, err, domain.ErrInsufficientFunds)
+}
+
+func TestCancel_ResendOfADebitBackWithInsufficientFunds_KeepsAFailedCancelAndChangesNothingElse(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancelOfTheDeposit(t), testDepositProviderID, domaintest.FailBeforeApply)
+	givenThePlayerSpentElsewhereMeanwhile(t, fixture.wallet, "5000.00")
+
+	fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{
+			resentAt(theFailedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), testBalanceAfterWin, domain.FailureInsufficientFunds), resendTime),
+			theSettlingDeposit(t, domain.TransactionCompleted, "25.00"),
+			theWithdraw(t, domain.TransactionCompleted),
+		},
+		bets: []domain.Bet{theBet(t, domain.BetWon)},
+	})
+}
+
+func TestCancel_ResendOutcomeStillUnknown_ReturnsItPendingAsAReplayWithTheBetUnchanged(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	result, err := fixture.cancelAt(resendTime).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertReplayOf(t, result, err,
+		resentAt(thePendingCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet), resendTime),
+		betStatus(domain.BetPlaced))
+}
+
+func TestCancel_ConcurrentRetriesAfterTheResendDelay_ResendOnlyOnce(t *testing.T) {
+	fixture := givenItsCancelLeftPendingBy(t, givenACancel(t), testProviderID, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	executeCancelsConcurrently(t, fixture.cancelAt(resendTime), identicalCancelCommands(10))
+
+	assertDepositCalls(t, fixture.wallet, 2)
+}
+
+// §7.1: same key, same result. A FAILED row without reason was stored
+// before migration 00006.
+func TestCancel_ReplayOfAFailedCancel_ReturnsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   domain.FailureReason
+		expected error
+	}{
+		{name: "insufficient funds", reason: domain.FailureInsufficientFunds, expected: domain.ErrInsufficientFunds},
+		{name: "wallet rejected", reason: domain.FailureWalletRejected, expected: domain.ErrWalletRejected},
+		{name: "no reason stored", reason: "", expected: domain.ErrPreviousAttemptFailed},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenACancelWithStore(t, theArrangedStoreWith(t, aFailedCancelOfTheWithdraw(t, testCase.reason)))
+
+			_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+			assertErrorIs(t, err, testCase.expected)
+		})
+	}
 }
 
 func TestCancel_ReplayOfAFailedCancel_DoesNotCallTheWalletNorStoreAnything(t *testing.T) {
@@ -787,14 +930,44 @@ func newCancelFixture(t *testing.T, players *domaintest.FakePlayerRepository, st
 
 // cancelWith builds the handler with another Wallet (a wrapper of the fake).
 func (fixture cancelFixture) cancelWith(wallet domain.WalletClient) *CancelCommandHandler {
+	return fixture.cancelWithAt(wallet, testNow)
+}
+
+// cancelAt builds a handler whose clock says now, on the same store, Wallet
+// and IDs: a later request of the same provider.
+func (fixture cancelFixture) cancelAt(now time.Time) *CancelCommandHandler {
+	return fixture.cancelWithAt(fixture.wallet, now)
+}
+
+func (fixture cancelFixture) cancelWithAt(wallet domain.WalletClient, now time.Time) *CancelCommandHandler {
 	return NewCancelCommandHandler(
 		fixture.players,
 		fixture.store,
 		wallet,
 		fixture.ids,
-		domaintest.FixedClock{Time: testNow},
+		domaintest.FixedClock{Time: now},
 		slog.New(slog.NewJSONHandler(fixture.logs, nil)),
 	)
+}
+
+// givenItsCancelLeftPendingBy runs, at testNow, the cancel of providerID
+// whose compensating Wallet call ends with behaviour (one of
+// unknownOutcomes), so the cancel is stored PENDING.
+func givenItsCancelLeftPendingBy(t *testing.T, fixture cancelFixture, providerID string, behaviour domaintest.Behaviour) cancelFixture {
+	t.Helper()
+	fixture.wallet.Next(domaintest.Succeed, behaviour)
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(providerID))
+	if err != nil || result.Transaction.Status != domain.TransactionPending {
+		t.Fatalf("arrange: expected a PENDING cancel, got %+v, %v", result.Transaction, err)
+	}
+	return fixture
+}
+
+// changedAt is a stored transaction after its status changed at the given
+// time (e.g. an original marked CANCELLED when its cancel completed).
+func changedAt(tx domain.Transaction, at time.Time) domain.Transaction {
+	tx.UpdatedAt = at
+	return tx
 }
 
 // aDepositHandler works on the same fakes as the cancel, IDs included, to
@@ -830,10 +1003,11 @@ func theCompletedCancelOf(t *testing.T, original domain.Transaction, oldBalance,
 	return tx
 }
 
-func theFailedCancelOf(t *testing.T, original domain.Transaction, oldBalance string) domain.Transaction {
+func theFailedCancelOf(t *testing.T, original domain.Transaction, oldBalance string, reason domain.FailureReason) domain.Transaction {
 	t.Helper()
 	tx := thePendingCancelOf(t, original, oldBalance)
 	tx.Status = domain.TransactionFailed
+	tx.FailureReason = reason
 	return tx
 }
 
