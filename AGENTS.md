@@ -37,7 +37,7 @@ Instructions for AI coding agents (Claude Code and others) working in this repos
 - Conventional Commits: `feat(scope)`, `fix(scope)`, `test(scope)`, `refactor(scope)`,
   `docs(scope)`, `chore(scope)`, `build(scope)`, `ci(scope)`.
   Scopes: `domain`, `actions`, `queries`, `application`, `persistence`, `wallet`,
-  `auth`, `startup`, `docker`, `docs`, `plan`.
+  `auth`, `startup`, `docker`, `docs`, `plan`, `ci`.
 - Message body explains *why* when it is not obvious.
 
 ## Folder layout and dependency rules
@@ -130,6 +130,10 @@ docker compose down -v              # reset: deletes our database and the Wallet
 # Integration tests (need PostgreSQL and TEST_DATABASE_URL; see README)
 go vet -tags=integration ./...
 go test -count=1 -tags=integration ./Persistence/...
+
+# Also run by CI (.github/workflows/ci.yml) on every push and pull request
+go test -race ./...                 # needs a C compiler (cgo): runs in CI, not on the developer's Windows machine
+npx --yes @redocly/cli@2.71.0 lint docs/openapi.yaml   # OpenAPI spec (needs Node)
 ```
 
 > Stopping or restarting the `wallet` container resets its balances while our
