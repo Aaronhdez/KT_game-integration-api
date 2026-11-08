@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 	"github.com/aaronhdez/kt_game-integration-api/Domain/domaintest"
@@ -22,7 +23,229 @@ const (
 	testBalanceAfterBet                = "4989.50"
 )
 
+// Success: the Wallet pays, the deposit completes and the bet is WON
+
+func TestDeposit_WalletApplies_ReturnsTheCompletedDeposit(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
+}
+
+func TestDeposit_WalletApplies_ReturnsBetStatusWonAndNotReplayed(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetWon), false)
+}
+
+func TestDeposit_WalletApplies_StoresTheDepositAsCompletedAndTheBetAsWon(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{aCompletedDeposit(t, "25.00", "5014.50"), theWithdraw(t, domain.TransactionCompleted)},
+		bets:         []domain.Bet{theBet(t, domain.BetWon)},
+	})
+}
+
+func TestDeposit_ReadsTheOldBalanceThenSendsTheWithdrawsBetIDAndTheDepositIDAsReference(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, "25.00"))
+}
+
+// Intent first.
+func TestDeposit_StoresThePendingDepositBeforeCallingTheWallet(t *testing.T) {
+	fixture := givenADeposit(t)
+	wallet := &storeObservingWallet{FakeWallet: fixture.wallet, store: fixture.store}
+
+	fixture.depositWith(wallet).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertTransactionsSeenByTheWallet(t, wallet, aPendingDeposit(t, "25.00"), theWithdraw(t, domain.TransactionCompleted))
+}
+
+func TestDeposit_WalletApplies_LogsTheOutcomeWithTheProviderTransactionID(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertLogContains(t, fixture.logs, `"msg":"deposit"`, `"provider_transaction_id":"prov-tx-0002"`, `"bet_id":7`, `"outcome":"completed"`)
+}
+
+// Applied, new balance unknown (e.g. a 2xx with an unreadable body)
+
+func TestDeposit_WalletAppliedButBalanceUnknown_CompletesWithOldBalancePlusAmount(t *testing.T) {
+	fixture := givenADeposit(t)
+	wallet := balanceUnknownWallet{FakeWallet: fixture.wallet}
+
+	result, err := fixture.depositWith(wallet).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
+}
+
+// Unknown outcome: never FAILED, the bet stays PLACED
+
+func TestDeposit_WalletOutcomeUnknown_ReturnsPendingWithoutError(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADeposit(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+			assertResultTransaction(t, result, err, aPendingDeposit(t, "25.00"))
+		})
+	}
+}
+
+// betStatus is null only while a withdraw is PENDING; here the bet exists.
+func TestDeposit_WalletOutcomeUnknown_ReturnsBetStatusPlaced(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADeposit(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+			assertBetStatusAndReplayed(t, result, err, betStatus(domain.BetPlaced), false)
+		})
+	}
+}
+
+func TestDeposit_WalletOutcomeUnknown_KeepsThePendingDepositAndTheBetPlaced(t *testing.T) {
+	for _, testCase := range unknownOutcomes {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADeposit(t)
+			fixture.wallet.Next(domaintest.Succeed, testCase.behaviour)
+
+			fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+			assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, aPendingDeposit(t, "25.00")))
+		})
+	}
+}
+
+func TestDeposit_WalletTooSlowForTheCaller_ReturnsPendingWithoutError(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Slow)
+
+	result, err := fixture.deposit.Execute(givenACallerGivingUpAfter(t, 20*time.Millisecond), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aPendingDeposit(t, "25.00"))
+}
+
+// Not applied: FAILED record kept, the bet stays PLACED
+
+func TestDeposit_WalletRejects_IsWalletRejected(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrWalletRejected)
+}
+
+func TestDeposit_WalletRejects_KeepsAFailedDepositAndTheBetPlaced(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+}
+
+// Database failures around the Wallet call
+
+func TestDeposit_PendingInsertFails_ReturnsItsError(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, errDatabaseDown)
+}
+
+// Without a stored PENDING row, the Wallet could pay with no trace of it in
+// our database.
+func TestDeposit_PendingInsertFails_DoesNotCallTheWalletDeposit(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+// The Wallet paid but the outcome could not be saved: the database still
+// says PENDING, so that is what the API reports (202).
+func TestDeposit_OutcomeWriteFails_ReturnsPendingWithoutError(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aPendingDeposit(t, "25.00"))
+}
+
+func TestDeposit_OutcomeWriteFails_KeepsThePendingDepositAndTheBetPlaced(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.store.UpdateTransactionErr = errDatabaseDown
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, aPendingDeposit(t, "25.00")))
+}
+
+func TestDeposit_CallerLeavesDuringTheWalletCall_StillStoresTheOutcome(t *testing.T) {
+	fixture := givenADeposit(t)
+	ctx, leave := context.WithCancel(context.Background())
+	defer leave()
+	wallet := callerLeavingWallet{FakeWallet: fixture.wallet, leave: leave}
+
+	fixture.depositWith(wallet).Execute(ctx, aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{aCompletedDeposit(t, "25.00", "5014.50"), theWithdraw(t, domain.TransactionCompleted)},
+		bets:         []domain.Bet{theBet(t, domain.BetWon)},
+	})
+}
+
+// One active settlement per bet: while a deposit is PENDING the bet is
+// still PLACED, so only the unique index sees the earlier deposit.
+
+func TestDeposit_BetWithAPendingDeposit_IsBetAlreadySettled(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionPending)))
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrBetAlreadySettled)
+}
+
+func TestDeposit_BetWithAPendingDeposit_DoesNotCallTheWalletDeposit(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionPending)))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+// A FAILED deposit was never applied: the bet can still be settled.
+func TestDeposit_BetWithAFailedDeposit_CompletesTheNewDeposit(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anEarlierDeposit(t, domain.TransactionFailed)))
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
+}
+
 // Validation: before the lock and any Wallet call
+
 var invalidDepositCommands = []struct {
 	name        string
 	providerID  string
@@ -171,7 +394,7 @@ func TestDeposit_UnknownProviderWithdrawnTransactionID_IsTransactionNotFound(t *
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
-// Old balance read: nothing has been sent yet, 
+// Old balance read: nothing has been sent yet,
 // so a failure is "not applied" (502) and never a timeout.
 
 func TestDeposit_BalanceReadFails_IsWalletFailureNeverTimeout(t *testing.T) {
@@ -252,15 +475,20 @@ func newDepositFixture(t *testing.T, players *domaintest.FakePlayerRepository, s
 	for _, bet := range stored.bets {
 		fixture.store.PutBet(bet)
 	}
-	fixture.deposit = NewDepositCommandHandler(
+	fixture.deposit = fixture.depositWith(fixture.wallet)
+	return fixture
+}
+
+// depositWith builds the handler with another Wallet (a wrapper of the fake).
+func (fixture depositFixture) depositWith(wallet domain.WalletClient) *DepositCommandHandler {
+	return NewDepositCommandHandler(
 		fixture.players,
 		fixture.store,
-		fixture.wallet,
+		wallet,
 		&domaintest.FakeIDGenerator{},
 		domaintest.FixedClock{Time: testNow},
 		slog.New(slog.NewJSONHandler(fixture.logs, nil)),
 	)
-	return fixture
 }
 
 func theArrangedStore(t *testing.T) storeContents {
@@ -269,6 +497,15 @@ func theArrangedStore(t *testing.T) storeContents {
 		transactions: []domain.Transaction{theWithdraw(t, domain.TransactionCompleted)},
 		bets:         []domain.Bet{theBet(t, domain.BetPlaced)},
 	}
+}
+
+// theArrangedStoreWith is theArrangedStore plus one more transaction, which
+// sorts before the withdraw: the store returns them by ID.
+func theArrangedStoreWith(t *testing.T, tx domain.Transaction) storeContents {
+	t.Helper()
+	stored := theArrangedStore(t)
+	stored.transactions = append([]domain.Transaction{tx}, stored.transactions...)
+	return stored
 }
 
 func aDepositCommand(t *testing.T, amount string) DepositCommand {
@@ -324,6 +561,65 @@ func theBet(t *testing.T, status domain.BetStatus) domain.Bet {
 	bet := domain.NewPlacedBet(testBetID, testUserID, domain.USD, givenAParsedMoney(t, testWithdrawnStake), testNow)
 	bet.Status = status
 	return bet
+}
+
+func aPendingDeposit(t *testing.T, amount string) domain.Transaction {
+	t.Helper()
+	return domain.Transaction{
+		ID:                    domaintest.FakeTransactionID(1),
+		Type:                  domain.TransactionDeposit,
+		Status:                domain.TransactionPending,
+		UserID:                testUserID,
+		BetID:                 testBetID,
+		ProviderTransactionID: testDepositProviderID,
+		Amount:                givenAParsedMoney(t, amount),
+		Currency:              domain.USD,
+		OldBalance:            givenAParsedMoney(t, testBalanceAfterBet),
+		CreatedAt:             testNow,
+		UpdatedAt:             testNow,
+	}
+}
+
+func aCompletedDeposit(t *testing.T, amount, newBalance string) domain.Transaction {
+	t.Helper()
+	tx := aPendingDeposit(t, amount)
+	balance := givenAParsedMoney(t, newBalance)
+	tx.Status = domain.TransactionCompleted
+	tx.NewBalance = &balance
+	return tx
+}
+
+func aFailedDeposit(t *testing.T, amount string) domain.Transaction {
+	t.Helper()
+	tx := aPendingDeposit(t, amount)
+	tx.Status = domain.TransactionFailed
+	return tx
+}
+
+// anEarlierDeposit is another deposit on the same bet, with its own provider
+// and transaction IDs.
+func anEarlierDeposit(t *testing.T, status domain.TransactionStatus) domain.Transaction {
+	t.Helper()
+	tx := aPendingDeposit(t, "30.00")
+	tx.ID = domaintest.FakeTransactionID(60)
+	tx.ProviderTransactionID = "prov-tx-0003"
+	tx.Status = status
+	return tx
+}
+
+func depositCall(t *testing.T, amount string) domaintest.Call {
+	t.Helper()
+	return domaintest.Call{
+		Method: "Deposit",
+		UserID: testUserID,
+		Operation: domain.WalletOperation{
+			UserID:    testUserID,
+			Currency:  domain.USD,
+			Amount:    givenAParsedMoney(t, amount),
+			BetID:     testBetID,
+			Reference: domaintest.FakeTransactionID(1),
+		},
+	}
 }
 
 // Assertions
