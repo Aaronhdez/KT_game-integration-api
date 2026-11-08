@@ -59,19 +59,33 @@ func TestRouter_PostPlayer_ReturnsNotFound(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusNotFound)
 }
 
+func TestRouter_PostWithdraw_ReachesTheWithdrawHandler(t *testing.T) {
+	recorder := aPOST("/api/v1/withdraw")
+
+	assertStatusCode(t, recorder, withdrawStubStatus)
+}
+
+func TestRouter_GetWithdraw_ReturnsNotFound(t *testing.T) {
+	recorder := aGET("/api/v1/withdraw")
+
+	assertStatusCode(t, recorder, http.StatusNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // Each stub answers an unusual status of its own, so a test can tell which
 // route the request reached.
 const (
-	loginStubStatus  = http.StatusTeapot
-	playerStubStatus = http.StatusAccepted
+	loginStubStatus    = http.StatusTeapot
+	playerStubStatus   = http.StatusAccepted
+	withdrawStubStatus = http.StatusNonAuthoritativeInfo
 )
 
 func stubHandlers() Handlers {
 	return Handlers{
-		Login:  statusStub(loginStubStatus),
-		Player: statusStub(playerStubStatus),
+		Login:    statusStub(loginStubStatus),
+		Player:   statusStub(playerStubStatus),
+		Withdraw: statusStub(withdrawStubStatus),
 	}
 }
 

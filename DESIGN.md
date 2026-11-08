@@ -7,11 +7,11 @@
 
 | Situation | Behaviour | Why |
 |---|---|---|
-| Wallet returns an error **before** applying the operation | Only a *definitive* rejection counts as "not applied": `400 InsufficientBalance` → `FAILED`, `422 INSUFFICIENT_FUNDS`; any other `400` or a `401` → `FAILED`, `502 WALLET_ERROR`, logged at `error` (it means a bug on our side or a wrong `WALLET_API_KEY`). The client classifies by HTTP status **and** body `code`; anything it does not recognise is *unknown*, never `FAILED`. *Use-case side: 08.* | Insufficient funds and validation errors are both `400`; only `code` tells them apart (findings Q3–Q5). A wrong `FAILED` cannot be undone, a `PENDING` can be resolved. |
-| Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. It is resolved by re-sending the identical request: `409 DuplicatedTransaction` means it had been applied. *Details: 05, 08, 11.* | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
-| Wallet times out | **Operations:** each call is bounded by `WALLET_OPERATION_TIMEOUT` (6 s). No answer in time is *unknown* → `PENDING`, `202`. The client never re-sends an operation by itself. **Balance reads:** `WALLET_BALANCE_TIMEOUT` (10 s) per attempt, one retry after 200 ms on a timeout, a network error or a `5xx`; the read then fails with `504 WALLET_TIMEOUT` or `502 WALLET_ERROR`. Worst case ≈ 20 s, still bounded. *Use-case side: 07, 08.* | The Wallet never answers a POST after ~5 s but a balance read can take ~15 s (findings Q7); one shared 3 s timeout would have turned a third of successful operations into `PENDING`. A read is safe to repeat; an operation re-sent immediately could race the original (Q8), so re-sending is left to the resolution of Phase 11. |
-| Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. *Resolution: 08, 11.* | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
-| Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, so a retry sees the first request's transaction (replay or `409`). The unique index `(wallet_user_id, provider_transaction_id)` is the safety net if two requests ever race past it (e.g. two API instances). *Replay rules: 08.* | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
+| Wallet returns an error **before** applying the operation | Only a *definitive* rejection counts as "not applied": `400 InsufficientBalance` → `FAILED`, `422 INSUFFICIENT_FUNDS`; any other `400` or a `401` → `FAILED`, `502 WALLET_ERROR`, logged at `error` (it means a bug on our side or a wrong `WALLET_API_KEY`). The client classifies by HTTP status **and** body `code`; anything it does not recognise is *unknown*, never `FAILED`. A withdraw keeps its transaction as `FAILED` (for audit) and creates no bet. | Insufficient funds and validation errors are both `400`; only `code` tells them apart (findings Q3–Q5). A wrong `FAILED` cannot be undone, a `PENDING` can be resolved. |
+| Wallet returns an error **after** applying it | A `500` (and any response we never receive) is *unknown*: the transaction stays `PENDING` and the API answers `202`. A withdraw answers `202` with `status: PENDING` and `newBalance`/`betStatus` `null`. It is resolved by re-sending the identical request: `409 DuplicatedTransaction` means it had been applied. *Resolution: 11.* | In the Phase 01 spike every Wallet `500` had been applied (36 of 36), and dropped connections were sometimes applied too. Marking them `FAILED` would contradict what the Wallet actually did. See [`docs/wallet-findings.md`](docs/wallet-findings.md) Q6, Q8. |
+| Wallet times out | **Operations:** each call is bounded by `WALLET_OPERATION_TIMEOUT` (6 s). No answer in time is *unknown* → `PENDING`, `202`. The client never re-sends an operation by itself. **Balance reads:** `WALLET_BALANCE_TIMEOUT` (10 s) per attempt, one retry after 200 ms on a timeout, a network error or a `5xx`; the read then fails with `504 WALLET_TIMEOUT` or `502 WALLET_ERROR`. Worst case ≈ 20 s, still bounded. A withdraw reads the balance first (its `oldBalance`): if that read fails or times out, nothing has been sent, so it is a `502` (never `504`, which §7.3 reserves for reads) and nothing is stored. A withdraw's worst case is ≈ 20 s + 6 s ≈ 27 s, under the server's 30 s write timeout. | The Wallet never answers a POST after ~5 s but a balance read can take ~15 s (findings Q7); one shared 3 s timeout would have turned a third of successful operations into `PENDING`. A read is safe to repeat; an operation re-sent immediately could race the original (Q8), so re-sending is left to the resolution of Phase 11. |
+| Process stops between the Wallet call and the DB write | The transaction was committed as `PENDING` (with its `betId` and reference) **before** the Wallet call, so it is not lost; the player's lock is released by PostgreSQL when the connection closes. The outcome is written with a context that is not cancelled with the request (bounded by 5 s), so a provider hanging up does not leave an applied withdraw unrecorded; if the write itself fails, the transaction stays `PENDING` and the API answers `202`. *Resolution: 11.* | Intent-first (§9.1): the record of what we sent must exist before we send it, or a crash would leave a Wallet movement nobody knows about. |
+| Provider retries / sends the same request concurrently | Operations of one player are serialised by a lock, and the idempotency lookup runs inside it, before any Wallet call: a retry sees the first request's transaction. Same provider ID and payload → the stored result (`200`, or `202` while `PENDING`), without calling the Wallet; another amount → `409`. The unique index on `provider_transaction_id` is the safety net if two requests ever race past the lock (e.g. two API instances): the insert fails and the lookup runs again. Tested with 10 simultaneous identical requests → one Wallet call. | §9.2 asks for no duplicate effects even for simultaneous duplicates; a check in Go alone has a race window, a unique index does not. |
 | Wallet restarts and loses its state | Not detected. After a restart the Wallet is back at its seeded balances and has forgotten which requests it applied, so re-sending a `PENDING` request would apply it again. Accepted risk. *Mitigations, if any: 11.* | The Wallet keeps everything in memory and has no endpoint to query past transactions (findings Q1, Q10). In this setup it only restarts on purpose, and the documented reset (`docker compose down -v`) also wipes our database. |
 
 ## 2. How a PENDING transaction gets resolved
@@ -20,7 +20,10 @@
 
 ## 3. Retry of a request whose previous attempt ended FAILED
 
-*TBD (11).*
+*Interim (Phase 08), final decision in Phase 11:* the retry gets
+`409 CONFLICT` ("previous attempt failed") and the Wallet is not called. The
+provider transaction ID is already used by a transaction that did not succeed;
+repeating the original `422`/`502` would need its reason, which is not stored.
 
 ## 4. Zero-amount deposits
 
@@ -88,8 +91,11 @@ operations if a call outlives the lease).
 and "one cancel per transaction" are partial unique indexes, and the domain's
 amount and status rules are `CHECK` constraints. The repositories translate
 violations of the three business indexes into domain errors, so use cases never
-see PostgreSQL errors. The idempotency key is scoped per player: one player's
-provider ID can never collide with, or reveal, another player's transaction.
+see PostgreSQL errors. *Changed in Phase 08:* the idempotency index was per
+player; §6.1 requires provider transaction IDs to be unique across the whole
+system, so migration `00005` made it global. Lookups stay scoped by player, so
+another player's transaction is never returned: an ID they already used is a
+`409` that only says the ID is taken.
 
 **Money in PostgreSQL (Phase 04).** Amounts are `NUMERIC(20,2)` and cross the
 Go/SQL boundary as text (`Money.String()` in, `amount::text` out, then
@@ -150,6 +156,23 @@ still the truth. The query does not retry: the client already retries a balance
 read once, so the worst case is about 2 × `WALLET_BALANCE_TIMEOUT` (≈ 20 s), under
 the server's 30 s write timeout. Measured against the mock: answers took 0.5–15 s
 and the Wallet dropped 3 of 11 balance attempts, so the retry matters in practice.
+
+**Withdraw (Phase 08).** Invalid input (provider ID, amount ≤ 0, more than 2
+decimals, currency, a currency that is not the player's) is a `400` before the
+lock and before any Wallet call; a missing amount is reported as missing, not
+treated as zero. Under the player's lock: idempotency lookup → balance read
+(`oldBalance`, "as observed by our service", §7.4) → the `PENDING` transaction
+with its reserved `betId` is committed → Wallet withdraw with our transaction
+ID as `reference` → the outcome. Applied → `COMPLETED` and the `PLACED` bet in
+one database transaction (`201`); if the Wallet applied it but its new balance
+is unknown, `newBalance` is `oldBalance − amount`, exact because the balance
+was read under the lock just before. Insufficient funds → `FAILED`, `422`;
+another definitive rejection → `FAILED`, `502`; anything else stays `PENDING`
+(`202`). One log line per withdraw with the transaction and provider IDs, the
+bet ID, the amount and the outcome. Measured against the mock (10 withdraws):
+6 × `201`, 3 × `202`, 1 × `502` (balance read failed twice); the three
+`PENDING` ones had been applied by the Wallet, so resolving them (Phase 11) is
+a normal path, not an edge case.
 
 *Future improvements (authentication):* refresh tokens and revocation (today a
 leaked token is valid until it expires — keep `JWT_TTL` short), rate limiting or

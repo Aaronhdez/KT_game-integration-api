@@ -64,12 +64,14 @@ HTTP ─► Application.WithdrawHandler
           │ decode + validate DTO, read userId from JWT
           ▼
         Actions.Withdraw.Execute(ctx, cmd)
+          0. validate input (400) and find the player (404)
           1. lock player (per-player serialisation)
           2. idempotency lookup by providerTransactionId
-               same payload → replay (200) | different → CONFLICT (409)
-          3. persist WITHDRAW as PENDING (+ reserved betId)   ← committed
-          4. WalletClient.Withdraw (with timeout)
-          5. classify outcome:
+               same payload → replay (200 / 202) | different → CONFLICT (409)
+          3. read the balance from the Wallet (oldBalance)
+          4. persist WITHDRAW as PENDING (+ reserved betId)   ← committed
+          5. WalletClient.Withdraw (with timeout)
+          6. classify outcome:
                applied     → COMPLETED + bet PLACED  (201)
                not applied → FAILED                  (422 / 502)
                unknown     → stays PENDING           (202)
@@ -98,7 +100,8 @@ maps to HTTP with `errors.Is`.
 
 Migrations live in `Persistence/migrations/` (embedded in the binary, applied by
 goose at startup): `00001_create_players`, `00002_create_bets`,
-`00003_create_transactions`, `00004_seed_players`. A migration that has been
+`00003_create_transactions`, `00004_seed_players`,
+`00005_global_provider_transaction_id` (Phase 08). A migration that has been
 applied is never edited; changes go in a new file.
 
 | Table | Columns | Constraints |
@@ -112,7 +115,7 @@ or two instances race:
 
 | Index (partial, on `transactions`) | Rule | Domain error on violation |
 |---|---|---|
-| `transactions_idempotency_key` `(wallet_user_id, provider_transaction_id)` where `WITHDRAW`/`DEPOSIT` | One transaction per provider ID and player (§7.1) | `ErrTransactionExists` |
+| `transactions_idempotency_key` `(provider_transaction_id)` where `WITHDRAW`/`DEPOSIT` | One transaction per provider ID across the whole system (§6.1, §7.1; per player until Phase 08) | `ErrTransactionExists` |
 | `transactions_active_settlement` `(bet_id)` where `DEPOSIT` and `PENDING`/`COMPLETED` | One active settlement per bet (§8.4) | `ErrBetAlreadySettled` |
 | `transactions_single_cancel` `(cancelled_transaction_id)` where `CANCEL` | One cancel per transaction (§8.5) | `ErrAlreadyCancelled` |
 
@@ -219,6 +222,32 @@ GET /api/v1/player
 | `Startup/main.go`, `router.go` | `wallet.NewClient` from the config; `Handlers.Player` = `RequireAuth(...)(PlayerController)`; route `GET /api/v1/player` |
 
 No per-player lock: the read changes nothing (see `DESIGN.md`).
+
+## Withdraw (Phase 08)
+
+```
+POST /api/v1/withdraw
+  application.RequireAuth           no / invalid token → 401
+    application.WithdrawController  decode (missing amount → 400), user ID from the context
+      actions.WithdrawCommandHandler
+        domain.PlayerRepository     ← persistence.PlayerRepository
+        domain.PlayerLocker         ← persistence.PlayerLocker       advisory lock + UnitOfWork
+        domain.WalletClient         ← wallet.Client                  balance read, then withdraw
+        domain.IDGenerator          ← id.UUID                        (Shared/id)
+        domain.Clock                ← clock.System
+    application.writeTransactionResult   §7.4 body; 202 PENDING / 200 replay / 201
+```
+
+| Package / file | Content |
+|---|---|
+| `Actions/transaction_result.go` | `TransactionResult{Transaction, BetStatus *BetStatus, Replayed}`, shared by Withdraw, Deposit and Cancel |
+| `Actions/withdraw.go` | `WithdrawCommandHandler`: validation, `withdrawLocked` (replay → old balance → `PENDING` → Wallet → outcome), `replayIfProcessed`, `complete`, `fail`, `leavePending`, one log line per withdraw |
+| `Application/transaction_response.go` | `transactionResponse` (§7.4) and `writeTransactionResult` (§7.2 status) |
+| `Application/withdraw.go` | `WithdrawController` and its `withdrawRequest` DTO (`Amount *domain.Money`) |
+| `Shared/id` | `UUID`: `domain.IDGenerator` with the standard library's `uuid.NewV4` |
+| `Domain/domaintest/store.go` | `FakeStore`: in-memory transactions and bets, `PlayerLocker` (one lock per player), `UnitOfWork` (copy, commit on `nil`), same unique rules as PostgreSQL |
+| `Domain/domaintest/ids.go` | `FakeIDGenerator` and `FakeTransactionID(n)` |
+| `Startup/main.go`, `router.go` | `Handlers.Withdraw` = `RequireAuth(...)(WithdrawController)`; route `POST /api/v1/withdraw` |
 
 ### Naming convention
 

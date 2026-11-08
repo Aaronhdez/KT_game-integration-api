@@ -18,6 +18,7 @@ import (
 	persistence "github.com/aaronhdez/kt_game-integration-api/Persistence"
 	queries "github.com/aaronhdez/kt_game-integration-api/Queries"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/clock"
+	"github.com/aaronhdez/kt_game-integration-api/Shared/id"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/password"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/token"
 	"github.com/aaronhdez/kt_game-integration-api/Shared/wallet"
@@ -134,12 +135,18 @@ func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
 	systemClock := clock.System{}
 	requireAuth := application.RequireAuth(tokens, systemClock)
 
+	// Operations of one player are serialised by a PostgreSQL advisory lock;
+	// each operation runs its queries on the connection that holds it.
+	playerLocker := persistence.NewPlayerLocker(pool)
+
 	login := actions.NewLoginCommandHandler(players, password.NewBcrypt(), tokens, systemClock)
 	getPlayer := queries.NewGetPlayerQueryHandler(players, walletClient)
+	withdraw := actions.NewWithdrawCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
 
 	return Handlers{
-		Login:  application.NewLoginController(login, logger),
-		Player: requireAuth(application.NewPlayerController(getPlayer, logger)),
+		Login:    application.NewLoginController(login, logger),
+		Player:   requireAuth(application.NewPlayerController(getPlayer, logger)),
+		Withdraw: requireAuth(application.NewWithdrawController(withdraw, logger)),
 	}
 }
 

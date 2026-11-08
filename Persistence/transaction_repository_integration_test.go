@@ -49,7 +49,7 @@ func TestTransactionRepository_Insert_SameProviderIDForSamePlayer_ReturnsTransac
 	assertErrorIs(t, err, domain.ErrTransactionExists)
 }
 
-func TestTransactionRepository_Insert_SameProviderIDForAnotherPlayer_IsStored(t *testing.T) {
+func TestTransactionRepository_Insert_SameProviderIDForAnotherPlayer_ReturnsTransactionExists(t *testing.T) {
 	pool := migratedTestDatabase(t)
 	repository := newTransactionRepository(pool)
 	first := newTestWithdraw(t, pool, eurPlayerID)
@@ -59,7 +59,7 @@ func TestTransactionRepository_Insert_SameProviderIDForAnotherPlayer_IsStored(t 
 
 	err := repository.Insert(testContext(t), anotherPlayers)
 
-	assertStoredTransaction(t, pool, err, anotherPlayers)
+	assertErrorIs(t, err, domain.ErrTransactionExists)
 }
 
 func TestTransactionRepository_Insert_SecondActiveDepositOnSameBet_ReturnsBetAlreadySettled(t *testing.T) {
