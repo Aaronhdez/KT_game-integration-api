@@ -276,7 +276,7 @@ Status is **400**, the same as validation errors; only `code` distinguishes them
 - **The Wallet requires `amount < balance` (strict)**: a player can never
   withdraw their whole balance. We do not re-implement this rule (we never cache
   the balance, and the Wallet is the authority); we just report what it says.
-  Recorded in `DESIGN.md` §5 as a known Wallet behaviour (step 15).
+  Recorded in `docs/decisions.md` §5 as a known Wallet behaviour (step 15).
 - Only withdraws were tested: deposits add money, so they cannot run out of it.
 
 ## Q6 — Random failures
