@@ -250,7 +250,7 @@ func TestCancel_OfADepositWithInsufficientFunds_KeepsAFailedCancelAndChangesNoth
 
 	assertStoreHolds(t, fixture.store, storeContents{
 		transactions: []domain.Transaction{
-			theFailedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), "25.00"),
+			theFailedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), "25.00", domain.FailureInsufficientFunds),
 			theSettlingDeposit(t, domain.TransactionCompleted, "25.00"),
 			theWithdraw(t, domain.TransactionCompleted),
 		},
@@ -354,7 +354,7 @@ func TestCancel_WalletRejects_KeepsAFailedCancelAndTheWithdrawCompleted(t *testi
 
 	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
 
-	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, theFailedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet)))
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, theFailedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, domain.FailureWalletRejected)))
 }
 
 // Database failures around the Wallet call
@@ -830,10 +830,11 @@ func theCompletedCancelOf(t *testing.T, original domain.Transaction, oldBalance,
 	return tx
 }
 
-func theFailedCancelOf(t *testing.T, original domain.Transaction, oldBalance string) domain.Transaction {
+func theFailedCancelOf(t *testing.T, original domain.Transaction, oldBalance string, reason domain.FailureReason) domain.Transaction {
 	t.Helper()
 	tx := thePendingCancelOf(t, original, oldBalance)
 	tx.Status = domain.TransactionFailed
+	tx.FailureReason = reason
 	return tx
 }
 

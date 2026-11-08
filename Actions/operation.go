@@ -50,12 +50,18 @@ func (o operation) outcomeContext(ctx context.Context) (context.Context, context
 	return context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
 }
 
-// fail stores the transaction as FAILED (the Wallet did not apply it) and
-// returns the Wallet's error, which the API maps to 422 or 502. Nothing else
-// changes. betStatus is what leavePending reports if the write fails.
+// fail stores the transaction as FAILED (the Wallet did not apply it) with
+// the reason, and returns the Wallet's error, which the API maps to 422 or
+// 502. Nothing else changes. betStatus is what leavePending reports if the
+// write fails.
 func (o operation) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, betStatus *domain.BetStatus, walletErr error) (TransactionResult, error) {
+	reason, outcome, level := domain.FailureWalletRejected, "rejected", slog.LevelError
+	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
+		reason, outcome, level = domain.FailureInsufficientFunds, "insufficient_funds", slog.LevelWarn
+	}
+
 	failed := pending
-	if err := failed.Fail(o.clock.Now()); err != nil {
+	if err := failed.Fail(reason, o.clock.Now()); err != nil {
 		return TransactionResult{}, fmt.Errorf("%s: %w", o.name, err)
 	}
 
@@ -66,10 +72,6 @@ func (o operation) fail(ctx context.Context, uow domain.UnitOfWork, pending doma
 		return o.leavePending(pending, betStatus, "outcome_not_stored", err), nil
 	}
 
-	outcome, level := "rejected", slog.LevelError
-	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
-		outcome, level = "insufficient_funds", slog.LevelWarn
-	}
 	o.log(level, failed, outcome, walletErr)
 	return TransactionResult{}, fmt.Errorf("%s: %w", o.name, walletErr)
 }

@@ -160,7 +160,7 @@ func TestDeposit_WalletRejects_KeepsAFailedDepositAndTheBetPlaced(t *testing.T) 
 
 	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
 
-	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, aFailedDeposit(t, "25.00", domain.FailureWalletRejected)))
 }
 
 // Database failures around the Wallet call
@@ -454,7 +454,7 @@ func TestDeposit_ReplayOfAPendingDeposit_DoesNotCallTheWallet(t *testing.T) {
 }
 
 func TestDeposit_ReplayOfAFailedDeposit_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00", domain.FailureWalletRejected)))
 
 	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
 
@@ -462,7 +462,7 @@ func TestDeposit_ReplayOfAFailedDeposit_IsPreviousAttemptFailed(t *testing.T) {
 }
 
 func TestDeposit_ReplayOfAFailedDeposit_DoesNotCallTheWallet(t *testing.T) {
-	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00", domain.FailureWalletRejected)))
 
 	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
 
@@ -973,10 +973,11 @@ func aCompletedDeposit(t *testing.T, amount, newBalance string) domain.Transacti
 	return tx
 }
 
-func aFailedDeposit(t *testing.T, amount string) domain.Transaction {
+func aFailedDeposit(t *testing.T, amount string, reason domain.FailureReason) domain.Transaction {
 	t.Helper()
 	tx := aPendingDeposit(t, amount)
 	tx.Status = domain.TransactionFailed
+	tx.FailureReason = reason
 	return tx
 }
 

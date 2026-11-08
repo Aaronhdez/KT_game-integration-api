@@ -235,6 +235,16 @@ func TestFakeStoreTransactions_Update_StoresOnlyStatusNewBalanceAndUpdatedAt(t *
 	assertStoredTransactions(t, store, err, want)
 }
 
+func TestFakeStoreTransactions_Update_StoresTheFailureReason(t *testing.T) {
+	store := NewFakeStore()
+	store.PutTransaction(givenAPendingWithdraw(t, 1, testUserID, "prov-1"))
+	failed := givenAFailedWithdraw(t, 1, testUserID, "prov-1")
+
+	err := updateTransaction(store, failed)
+
+	assertStoredTransactions(t, store, err, failed)
+}
+
 func TestFakeStoreTransactions_Update_AnotherPlayersTransaction_ReturnsTransactionNotFound(t *testing.T) {
 	store := NewFakeStore()
 	store.PutTransaction(givenAPendingWithdraw(t, 1, testUserID, "prov-1"))
@@ -396,6 +406,15 @@ func givenACompletedDeposit(t *testing.T, n int, userID domain.UserID, providerI
 	newBalance := givenAParsedMoney(t, "5010.50")
 	tx.Status = domain.TransactionCompleted
 	tx.NewBalance = &newBalance
+	tx.UpdatedAt = testNow.Add(time.Second)
+	return tx
+}
+
+func givenAFailedWithdraw(t *testing.T, n int, userID domain.UserID, providerID string) domain.Transaction {
+	t.Helper()
+	tx := givenAPendingWithdraw(t, n, userID, providerID)
+	tx.Status = domain.TransactionFailed
+	tx.FailureReason = domain.FailureInsufficientFunds
 	tx.UpdatedAt = testNow.Add(time.Second)
 	return tx
 }
@@ -619,8 +638,8 @@ func describeTransaction(tx domain.Transaction) string {
 	if tx.NewBalance != nil {
 		newBalance = tx.NewBalance.String()
 	}
-	return fmt.Sprintf("%s %s %s user=%d bet=%d provider=%s cancels=%q amount=%s %s old=%s new=%s created=%s updated=%s",
-		tx.ID, tx.Type, tx.Status, tx.UserID, tx.BetID, tx.ProviderTransactionID, tx.CancelledTransactionID,
+	return fmt.Sprintf("%s %s %s reason=%q user=%d bet=%d provider=%s cancels=%q amount=%s %s old=%s new=%s created=%s updated=%s",
+		tx.ID, tx.Type, tx.Status, tx.FailureReason, tx.UserID, tx.BetID, tx.ProviderTransactionID, tx.CancelledTransactionID,
 		tx.Amount, tx.Currency, tx.OldBalance, newBalance,
 		tx.CreatedAt.Format(time.RFC3339Nano), tx.UpdatedAt.Format(time.RFC3339Nano))
 }

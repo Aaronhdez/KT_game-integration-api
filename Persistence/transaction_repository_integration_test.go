@@ -586,7 +586,7 @@ func newTestCancel(t *testing.T, pool *pgxpool.Pool, original domain.Transaction
 // its creation, as a use case would when the Wallet did not apply it.
 func failTransaction(t *testing.T, tx *domain.Transaction) {
 	t.Helper()
-	if err := tx.Fail(tx.CreatedAt.Add(time.Second)); err != nil {
+	if err := tx.Fail(domain.FailureWalletRejected, tx.CreatedAt.Add(time.Second)); err != nil {
 		t.Fatalf("fail transaction %s: %v", tx.ID, err)
 	}
 }

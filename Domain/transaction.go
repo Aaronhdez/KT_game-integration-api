@@ -22,10 +22,20 @@ const (
 	TransactionCancelled TransactionStatus = "CANCELLED"
 )
 
+// FailureReason says why the Wallet did not apply a FAILED transaction, so a
+// retry of the same request can get the same answer as the first attempt (§7.1).
+type FailureReason string
+
+const (
+	FailureInsufficientFunds FailureReason = "INSUFFICIENT_FUNDS" // answered 422
+	FailureWalletRejected    FailureReason = "WALLET_REJECTED"    // answered 502
+)
+
 type Transaction struct {
 	ID                     TransactionID
 	Type                   TransactionType
 	Status                 TransactionStatus
+	FailureReason          FailureReason // only when FAILED; empty if it failed before reasons were stored
 	UserID                 UserID
 	BetID                  BetID
 	ProviderTransactionID  ProviderTransactionID
@@ -109,14 +119,32 @@ func (tx *Transaction) Complete(newBalance Money, now time.Time) error {
 }
 
 // Fail records that the service established the Wallet did not apply the
-// operation. Only a PENDING transaction can fail.
-func (tx *Transaction) Fail(now time.Time) error {
+// operation, and why. Only a PENDING transaction can fail.
+func (tx *Transaction) Fail(reason FailureReason, now time.Time) error {
 	if tx.Status != TransactionPending {
 		return fmt.Errorf("%w: transaction %s is %s", ErrInvalidTransition, tx.ID, tx.Status)
 	}
+	if reason != FailureInsufficientFunds && reason != FailureWalletRejected {
+		return fmt.Errorf("transaction %s: unknown failure reason %q", tx.ID, reason)
+	}
 	tx.Status = TransactionFailed
+	tx.FailureReason = reason
 	tx.UpdatedAt = now
 	return nil
+}
+
+// FailureError is the error a retry of this FAILED transaction gets: the same
+// one its first attempt got. A transaction that failed before reasons were
+// stored has none, so its retry gets ErrPreviousAttemptFailed.
+func (tx *Transaction) FailureError() error {
+	switch tx.FailureReason {
+	case FailureInsufficientFunds:
+		return ErrInsufficientFunds
+	case FailureWalletRejected:
+		return ErrWalletRejected
+	default:
+		return ErrPreviousAttemptFailed
+	}
 }
 
 // MarkCancelled records that a completed withdraw or deposit has been reverted

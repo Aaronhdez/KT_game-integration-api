@@ -252,6 +252,7 @@ func (repository *fakeTransactionRepository) Update(_ context.Context, tx domain
 		return domain.ErrTransactionNotFound
 	}
 	stored.Status = tx.Status
+	stored.FailureReason = tx.FailureReason
 	stored.NewBalance = tx.NewBalance
 	stored.UpdatedAt = tx.UpdatedAt
 	repository.state.transactions[tx.ID] = stored

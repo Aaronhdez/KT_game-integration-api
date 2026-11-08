@@ -150,7 +150,7 @@ func TestWithdraw_InsufficientFunds_KeepsAFailedTransactionAndCreatesNoBet(t *te
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "6000.00"))
 
-	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "6000.00"))
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "6000.00", domain.FailureInsufficientFunds))
 }
 
 func TestWithdraw_WalletRejects_IsWalletRejected(t *testing.T) {
@@ -168,7 +168,7 @@ func TestWithdraw_WalletRejects_KeepsAFailedTransactionAndCreatesNoBet(t *testin
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
-	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "10.50"))
+	assertStoredTransactionsAndNoBets(t, fixture.store, aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
 }
 
 // Validation (§7.3, §8.3): before any Wallet call
@@ -414,7 +414,7 @@ func TestWithdraw_ReplayOfAPendingWithdraw_DoesNotCallTheWallet(t *testing.T) {
 
 func TestWithdraw_ReplayOfAFailedWithdraw_IsPreviousAttemptFailed(t *testing.T) {
 	fixture := givenAWithdraw(t)
-	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
 
 	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
@@ -423,7 +423,7 @@ func TestWithdraw_ReplayOfAFailedWithdraw_IsPreviousAttemptFailed(t *testing.T) 
 
 func TestWithdraw_ReplayOfAFailedWithdraw_DoesNotCallTheWallet(t *testing.T) {
 	fixture := givenAWithdraw(t)
-	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50"))
+	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
 
 	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
@@ -626,10 +626,11 @@ func aCompletedWithdraw(t *testing.T, amount, newBalance string) domain.Transact
 	return tx
 }
 
-func aFailedWithdraw(t *testing.T, amount string) domain.Transaction {
+func aFailedWithdraw(t *testing.T, amount string, reason domain.FailureReason) domain.Transaction {
 	t.Helper()
 	tx := aPendingWithdraw(t, amount)
 	tx.Status = domain.TransactionFailed
+	tx.FailureReason = reason
 	return tx
 }
 

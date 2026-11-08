@@ -178,8 +178,8 @@ func describeTransaction(tx domain.Transaction) string {
 	if tx.NewBalance != nil {
 		newBalance = tx.NewBalance.String()
 	}
-	return fmt.Sprintf("%s %s %s user=%d bet=%d provider=%s cancels=%q amount=%s %s old=%s new=%s created=%s updated=%s",
-		tx.ID, tx.Type, tx.Status, tx.UserID, tx.BetID, tx.ProviderTransactionID, tx.CancelledTransactionID,
+	return fmt.Sprintf("%s %s %s reason=%q user=%d bet=%d provider=%s cancels=%q amount=%s %s old=%s new=%s created=%s updated=%s",
+		tx.ID, tx.Type, tx.Status, tx.FailureReason, tx.UserID, tx.BetID, tx.ProviderTransactionID, tx.CancelledTransactionID,
 		tx.Amount, tx.Currency, tx.OldBalance, newBalance,
 		tx.CreatedAt.Format(time.RFC3339Nano), tx.UpdatedAt.Format(time.RFC3339Nano))
 }
