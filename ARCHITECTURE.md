@@ -249,6 +249,23 @@ POST /api/v1/withdraw
 | `Domain/domaintest/ids.go` | `FakeIDGenerator` and `FakeTransactionID(n)` |
 | `Startup/main.go`, `router.go` | `Handlers.Withdraw` = `RequireAuth(...)(WithdrawController)`; route `POST /api/v1/withdraw` |
 
+## Deposit (Phase 09)
+
+Same chain as the withdraw (`RequireAuth` → `DepositController` →
+`DepositCommandHandler` with the same ports and adapters, including the same
+`PlayerLocker`, so a withdraw and a deposit of one player are serialised too).
+
+| Package / file | Content |
+|---|---|
+| `Actions/operation.go` | Helpers shared by the money operations: `readOldBalance` (balance read + currency check → `ErrWalletFailure`) and `logTransaction` (one log line per operation) |
+| `Actions/deposit.go` | `DepositCommandHandler`: validation, `depositLocked` (replay → `findBetToSettle` → old balance → zero amount: `settleWithoutWallet` / otherwise `PENDING` → Wallet → outcome), `replayIfProcessed`, `replayAfterDuplicateInsert`, `complete`, `fail`, `leavePending` |
+| `Application/deposit.go` | `DepositController` and its `depositRequest` DTO (`Amount *domain.Money`) |
+| `Startup/main.go`, `router.go` | `Handlers.Deposit` = `RequireAuth(...)(DepositController)`; route `POST /api/v1/deposit` |
+
+No schema change: "one active settlement per bet" is the
+`transactions_active_settlement` index of Phase 04, mapped to
+`ErrBetAlreadySettled`.
+
 ### Naming convention
 
 | Layer | Name | Example |

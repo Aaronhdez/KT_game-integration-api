@@ -71,6 +71,18 @@ func TestRouter_GetWithdraw_ReturnsNotFound(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusNotFound)
 }
 
+func TestRouter_PostDeposit_ReachesTheDepositHandler(t *testing.T) {
+	recorder := aPOST("/api/v1/deposit")
+
+	assertStatusCode(t, recorder, depositStubStatus)
+}
+
+func TestRouter_GetDeposit_ReturnsNotFound(t *testing.T) {
+	recorder := aGET("/api/v1/deposit")
+
+	assertStatusCode(t, recorder, http.StatusNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // Each stub answers an unusual status of its own, so a test can tell which
@@ -79,6 +91,7 @@ const (
 	loginStubStatus    = http.StatusTeapot
 	playerStubStatus   = http.StatusAccepted
 	withdrawStubStatus = http.StatusNonAuthoritativeInfo
+	depositStubStatus  = http.StatusResetContent
 )
 
 func stubHandlers() Handlers {
@@ -86,6 +99,7 @@ func stubHandlers() Handlers {
 		Login:    statusStub(loginStubStatus),
 		Player:   statusStub(playerStubStatus),
 		Withdraw: statusStub(withdrawStubStatus),
+		Deposit:  statusStub(depositStubStatus),
 	}
 }
 

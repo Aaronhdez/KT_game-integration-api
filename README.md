@@ -154,7 +154,7 @@ Errors always have the body `{"code": "...", "message": "..."}`:
 | 401 | `UNAUTHORIZED` | Wrong credentials, or missing / invalid / expired token (same message for all) |
 | 404 | `NOT_FOUND` | Unknown route or method, or a resource that does not exist or belongs to another player |
 | 409 | `CONFLICT` | Idempotency conflict or invalid state (the message says which) |
-| 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the withdraw |
+| 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the operation for insufficient funds |
 | 502 | `WALLET_ERROR` | The Wallet failed or rejected the call, and nothing was applied |
 | 504 | `WALLET_TIMEOUT` | The Wallet did not answer a read in time (`GET /player` only; an operation with an unknown outcome is a `202`) |
 | 500 | `INTERNAL_ERROR` | Unexpected failure (e.g. database down). Not in the assessment; details only in the logs |
@@ -223,6 +223,35 @@ curl -i -X POST http://localhost:8080/api/v1/withdraw \
 The player comes from the token, and `providerTransactionId` is the
 idempotency key. Expect a few seconds per call and roughly one `202` in four
 from the unreliable Wallet.
+
+### Deposit (bet settlement)
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/deposit \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"currency":"USD","amount":25.00,"providerTransactionId":"prov-tx-0002","providerWithdrawnTransactionId":"prov-tx-0001"}'
+```
+
+`201` with `Cache-Control: no-store`:
+
+```json
+{"transactionId":"5d0c6f8e-2a41-4c1b-9f7e-3b8a6d2e1c40","providerTransactionId":"prov-tx-0002","oldBalance":4989.50,"newBalance":5014.50,"status":"COMPLETED","betStatus":"WON"}
+```
+
+`providerWithdrawnTransactionId` is the withdraw whose bet is settled. An
+amount greater than zero settles it as `WON`; `0` settles it as `LOST`, is
+**not sent to the Wallet** (no money moves) and answers `201` with
+`oldBalance` = `newBalance` (see `DESIGN.md` §4).
+
+| Status | When |
+|---|---|
+| `201` | Processed for the first time and `COMPLETED`; the bet is `WON` or `LOST` |
+| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":"PLACED"` (resolution: Phase 11) |
+| `400` | Missing or invalid field (a missing `amount` is not `0`), negative amount, more than 2 decimals, or a currency that is not the player's / the withdraw's |
+| `404` | The referenced withdraw does not exist, belongs to another player, or is not a withdraw |
+| `409` | The withdraw is not `COMPLETED`; the bet is already settled, cancelled or has another deposit in progress; same `providerTransactionId` with another payload or used by another player; or a retry of a deposit that ended `FAILED` |
+| `502` | The Wallet rejected the deposit, or the balance before it could not be read (nothing was sent) |
 
 *More `curl` examples and OpenAPI spec: Phase 13.*
 

@@ -88,19 +88,13 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 	providerID domain.ProviderTransactionID,
 	amount domain.Money,
 ) (TransactionResult, error) {
-	// A request already processed is answered from the database, without
-	// touching the Wallet (§7.1). Under the lock, so concurrent duplicates see
-	// the transaction stored by the first one.
 	if result, found, err := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
 		return result, err
 	}
 
-	balance, err := h.wallet.Balance(ctx, player.UserID)
+	oldBalance, err := readOldBalance(ctx, h.wallet, player)
 	if err != nil {
-		return TransactionResult{}, fmt.Errorf("withdraw: read old balance: %v: %w", err, domain.ErrWalletFailure)
-	}
-	if balance.Currency != player.Currency {
-		return TransactionResult{}, fmt.Errorf("withdraw: wallet currency %s, account currency %s: %w", balance.Currency, player.Currency, domain.ErrWalletFailure)
+		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
 
 	var pending domain.Transaction
@@ -116,23 +110,18 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 			ProviderTransactionID: providerID,
 			Amount:                amount,
 			Currency:              player.Currency,
-			OldBalance:            balance.Amount,
+			OldBalance:            oldBalance,
 		}, h.clock.Now())
 		if err != nil {
 			return err
 		}
 		return repos.Transactions.Insert(ctx, pending)
 	})
-	// The unique index found the provider ID taken although our lookup did not:
-	// either the same request was stored meanwhile (only possible if the lock
-	// failed), which is a replay, or the ID belongs to another player (§6.1),
-	// which stays ErrTransactionExists (409) without revealing their data.
+
 	if errors.Is(err, domain.ErrTransactionExists) {
 		if result, found, lookupErr := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
 			return result, lookupErr
 		}
-		// Its message reaches the provider: the reason only, no internal
-		// details such as the ID of the transaction we tried to store.
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrTransactionExists)
 	}
 	if err != nil {
@@ -231,27 +220,15 @@ func (h *WithdrawCommandHandler) leavePending(pending domain.Transaction, outcom
 	return TransactionResult{Transaction: pending}
 }
 
-// log writes the one line per withdraw required by §9.7. It never includes
-// tokens or secrets: only identifiers, the amount and the outcome.
+// log writes the one line per withdraw (see logTransaction).
 func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
-	attributes := []any{
-		"transaction_id", tx.ID,
-		"provider_transaction_id", tx.ProviderTransactionID,
-		"user_id", tx.UserID,
-		"bet_id", tx.BetID,
-		"amount", tx.Amount.String(),
-		"outcome", outcome,
-	}
-	if cause != nil {
-		attributes = append(attributes, "error", cause.Error())
-	}
-	h.logger.Log(context.Background(), level, "withdraw", attributes...)
+	logTransaction(h.logger, level, "withdraw", tx, outcome, cause)
 }
 
 // replayIfProcessed looks for a transaction already stored for providerID.
 // found is false when there is none. When there is one, the stored result is
-// returned without any Wallet call (§7.1, §7.2):
-//   - another amount or currency → ErrIdempotencyConflict (409);
+// returned without any Wallet call.
+//   - not a withdraw, or another amount or currency → ErrIdempotencyConflict (409);
 //   - FAILED → ErrPreviousAttemptFailed (409);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
@@ -275,7 +252,8 @@ func (h *WithdrawCommandHandler) replayIfProcessed(
 		}
 		found = true
 
-		if !previous.Amount.Equal(amount) || previous.Currency != currency {
+		if previous.Type != domain.TransactionWithdraw ||
+			!previous.Amount.Equal(amount) || previous.Currency != currency {
 			return domain.ErrIdempotencyConflict
 		}
 
