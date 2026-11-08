@@ -474,6 +474,48 @@ func TestWithdraw_SameProviderIDWithAnotherAmount_DoesNotCallTheWallet(t *testin
 	assertWalletCalls(t, fixture.wallet)
 }
 
+// §6.1: provider transaction IDs are unique across the whole system. The
+// other player's transaction is never returned, only "the ID is taken".
+func TestWithdraw_ProviderIDOfAnotherPlayer_IsTransactionExists(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(anotherPlayersWithdraw(t))
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrTransactionExists)
+}
+
+func TestWithdraw_ProviderIDOfAnotherPlayer_DoesNotCallTheWalletWithdraw(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(anotherPlayersWithdraw(t))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+func TestWithdraw_ProviderIDOfAnotherPlayer_LeavesTheirTransactionUntouched(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(anotherPlayersWithdraw(t))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertStoredTransactionsAndNoBets(t, fixture.store, anotherPlayersWithdraw(t))
+}
+
+// The safety net: an identical request stored by someone else between our
+// lookup and our insert (only possible if the lock failed, e.g. two API
+// instances) is still a replay, thanks to the unique index.
+func TestWithdraw_IdenticalRequestStoredMeanwhile_IsAReplayWithoutWithdrawing(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	wallet := &racingWallet{FakeWallet: fixture.wallet, store: fixture.store, stored: aWithdrawStoredByAnotherInstance(t)}
+	fixture.store.PutBet(aBetStoredByAnotherInstance(t))
+
+	result, err := fixture.withdrawWith(wallet).Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertReplayOf(t, result, err, aWithdrawStoredByAnotherInstance(t), betStatus(domain.BetPlaced))
+}
+
 // §9.2: "including when two identical requests arrive at the same time".
 func TestWithdraw_ConcurrentIdenticalRequests_CallTheWalletWithdrawOnce(t *testing.T) {
 	fixture := givenAWithdraw(t)

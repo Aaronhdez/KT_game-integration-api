@@ -123,6 +123,15 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 		}
 		return repos.Transactions.Insert(ctx, pending)
 	})
+	// The unique index found the provider ID taken although our lookup did not:
+	// either the same request was stored meanwhile (only possible if the lock
+	// failed), which is a replay, or the ID belongs to another player (§6.1),
+	// which stays ErrTransactionExists (409) without revealing their data.
+	if errors.Is(err, domain.ErrTransactionExists) {
+		if result, found, lookupErr := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
+			return result, lookupErr
+		}
+	}
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: store pending: %w", err)
 	}
