@@ -5,14 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
-
-// outcomeWriteTimeout bounds the database writes made after the Wallet call,
-// which no longer depend on the request's context.
-const outcomeWriteTimeout = 5 * time.Second
 
 // WithdrawCommand represents the data required to execute a withdraw operation.
 type WithdrawCommand struct {
@@ -24,12 +19,7 @@ type WithdrawCommand struct {
 
 // WithdrawCommandHandler handles the execution of withdraw commands.
 type WithdrawCommandHandler struct {
-	playerRepository domain.PlayerRepository
-	locker           domain.PlayerLocker
-	wallet           domain.WalletClient
-	ids              domain.IDGenerator
-	clock            domain.Clock
-	logger           *slog.Logger
+	operation
 }
 
 // NewWithdrawCommandHandler creates a new instance of WithdrawCommandHandler with the provided dependencies.
@@ -41,18 +31,19 @@ func NewWithdrawCommandHandler(
 	clock domain.Clock,
 	logger *slog.Logger,
 ) *WithdrawCommandHandler {
-	return &WithdrawCommandHandler{
+	return &WithdrawCommandHandler{operation{
+		name:             "withdraw",
 		playerRepository: playerRepository,
 		locker:           locker,
 		wallet:           wallet,
 		ids:              ids,
 		clock:            clock,
 		logger:           logger,
-	}
+	}}
 }
 
 // Execute handles the withdraw command by validating input, acquiring a player lock, and performing the withdrawal.
-func (h *WithdrawCommandHandler) Execute(ctx context.Context, command WithdrawCommand) (TransactionResult, error) {
+func (handler *WithdrawCommandHandler) Execute(ctx context.Context, command WithdrawCommand) (TransactionResult, error) {
 	providerTransactionID, err := domain.ParseProviderTransactionID(command.ProviderTransactionID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
@@ -64,7 +55,7 @@ func (h *WithdrawCommandHandler) Execute(ctx context.Context, command WithdrawCo
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
-	player, err := h.playerRepository.FindByID(ctx, command.UserID)
+	player, err := handler.playerRepository.FindByID(ctx, command.UserID)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
@@ -73,26 +64,26 @@ func (h *WithdrawCommandHandler) Execute(ctx context.Context, command WithdrawCo
 	}
 
 	var result TransactionResult
-	err = h.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
+	err = handler.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
 		var lockedErr error
-		result, lockedErr = h.withdrawLocked(ctx, uow, player, providerTransactionID, command.Amount)
+		result, lockedErr = handler.withdrawLocked(ctx, uow, player, providerTransactionID, command.Amount)
 		return lockedErr
 	})
 	return result, err
 }
 
-func (h *WithdrawCommandHandler) withdrawLocked(
+func (handler *WithdrawCommandHandler) withdrawLocked(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	player domain.Player,
 	providerID domain.ProviderTransactionID,
 	amount domain.Money,
 ) (TransactionResult, error) {
-	if result, found, err := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
+	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
 		return result, err
 	}
 
-	oldBalance, err := readOldBalance(ctx, h.wallet, player)
+	oldBalance, err := handler.readOldBalance(ctx, player)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
@@ -104,14 +95,14 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 			return err
 		}
 		pending, err = domain.NewWithdraw(domain.TransactionDetails{
-			ID:                    h.ids.NewTransactionID(),
+			ID:                    handler.ids.NewTransactionID(),
 			UserID:                player.UserID,
 			BetID:                 betID,
 			ProviderTransactionID: providerID,
 			Amount:                amount,
 			Currency:              player.Currency,
 			OldBalance:            oldBalance,
-		}, h.clock.Now())
+		}, handler.clock.Now())
 		if err != nil {
 			return err
 		}
@@ -119,7 +110,7 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 	})
 
 	if errors.Is(err, domain.ErrTransactionExists) {
-		if result, found, lookupErr := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
+		if result, found, lookupErr := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
 			return result, lookupErr
 		}
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrTransactionExists)
@@ -130,7 +121,7 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 
 	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
 	// it (docs/wallet-findings.md, Q8)
-	newBalance, walletErr := h.wallet.Withdraw(ctx, domain.WalletOperation{
+	newBalance, walletErr := handler.wallet.Withdraw(ctx, domain.WalletOperation{
 		UserID:    player.UserID,
 		Currency:  player.Currency,
 		Amount:    amount,
@@ -138,35 +129,32 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 		Reference: pending.ID,
 	})
 
-	// The Wallet may have taken the money even if the caller has gone away
-	// meanwhile, so the outcome is stored with a context that is not cancelled
-	// with the request, bounded by its own timeout.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
-	switch {
-	case walletErr == nil:
-		return h.complete(writeCtx, uow, pending, newBalance)
-	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+	switch classifyWalletResult(walletErr) {
+	case walletApplied:
+		return handler.complete(writeCtx, uow, pending, newBalance)
+	case walletAppliedBalanceUnknown:
 		// Exact: the old balance was read under the player's lock just before.
 		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(amount.Decimal()))
 		if err != nil {
-			return h.leavePending(pending, "balance_unknown", err), nil
+			return handler.leavePending(pending, nil, "balance_unknown", err), nil
 		}
-		return h.complete(writeCtx, uow, pending, derived)
-	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
-		return h.fail(writeCtx, uow, pending, walletErr)
+		return handler.complete(writeCtx, uow, pending, derived)
+	case walletNotApplied:
+		return handler.fail(writeCtx, uow, pending, nil, walletErr)
 	default:
 		// Unknown outcome (§9.3): it stays PENDING and the API answers 202.
-		return h.leavePending(pending, "pending", walletErr), nil
+		return handler.leavePending(pending, nil, "pending", walletErr), nil
 	}
 }
 
 // complete stores the withdraw as COMPLETED and creates its PLACED bet, both
 // in one database transaction. If that cannot be stored, the database still
 // says PENDING, and so does the result.
-func (h *WithdrawCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, newBalance domain.Money) (TransactionResult, error) {
-	now := h.clock.Now()
+func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, newBalance domain.Money) (TransactionResult, error) {
+	now := handler.clock.Now()
 	completed := pending
 	if err := completed.Complete(newBalance, now); err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
@@ -180,49 +168,11 @@ func (h *WithdrawCommandHandler) complete(ctx context.Context, uow domain.UnitOf
 		return repos.Transactions.Update(ctx, completed)
 	})
 	if err != nil {
-		return h.leavePending(pending, "outcome_not_stored", err), nil
+		return handler.leavePending(pending, nil, "outcome_not_stored", err), nil
 	}
 
-	h.log(slog.LevelInfo, completed, "completed", nil)
+	handler.log(slog.LevelInfo, completed, "completed", nil)
 	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
-}
-
-// fail stores the withdraw as FAILED (the Wallet did not apply it) and
-// returns the Wallet's error, which the API maps to 422 or 502.
-func (h *WithdrawCommandHandler) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, walletErr error) (TransactionResult, error) {
-	failed := pending
-	if err := failed.Fail(h.clock.Now()); err != nil {
-		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
-	}
-
-	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		return repos.Transactions.Update(ctx, failed)
-	})
-	if err != nil {
-		return h.leavePending(pending, "outcome_not_stored", err), nil
-	}
-
-	outcome, level := "rejected", slog.LevelError
-	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
-		outcome, level = "insufficient_funds", slog.LevelWarn
-	}
-	h.log(level, failed, outcome, walletErr)
-	return TransactionResult{}, fmt.Errorf("withdraw: %w", walletErr)
-}
-
-// leavePending returns the transaction as it is stored: PENDING, with no bet.
-func (h *WithdrawCommandHandler) leavePending(pending domain.Transaction, outcome string, cause error) TransactionResult {
-	level := slog.LevelWarn
-	if outcome == "outcome_not_stored" {
-		level = slog.LevelError
-	}
-	h.log(level, pending, outcome, cause)
-	return TransactionResult{Transaction: pending}
-}
-
-// log writes the one line per withdraw (see logTransaction).
-func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
-	logTransaction(h.logger, level, "withdraw", tx, outcome, cause)
 }
 
 // replayIfProcessed looks for a transaction already stored for providerID.
@@ -232,7 +182,7 @@ func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, ou
 //   - FAILED → ErrPreviousAttemptFailed (409);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
-func (h *WithdrawCommandHandler) replayIfProcessed(
+func (handler *WithdrawCommandHandler) replayIfProcessed(
 	ctx context.Context,
 	uow domain.UnitOfWork,
 	userID domain.UserID,

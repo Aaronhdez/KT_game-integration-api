@@ -262,6 +262,71 @@ func TestTransactionRepository_FindCancelOf_AnotherPlayersCancel_ReturnsTransact
 	assertErrorIs(t, err, domain.ErrTransactionNotFound)
 }
 
+func TestTransactionRepository_FindActiveDeposit_PendingDeposit_ReturnsIt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	deposit := newTestDeposit(t, pool, withdraw)
+	insertTransactionRow(t, pool, deposit)
+
+	result, err := repository.FindActiveDeposit(testContext(t), eurPlayerID, withdraw.BetID)
+
+	assertTransaction(t, result, err, deposit)
+}
+
+func TestTransactionRepository_FindActiveDeposit_CompletedDeposit_ReturnsIt(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	deposit := newTestDeposit(t, pool, withdraw)
+	completeTransaction(t, &deposit, "114.50")
+	insertTransactionRow(t, pool, deposit)
+
+	result, err := repository.FindActiveDeposit(testContext(t), eurPlayerID, withdraw.BetID)
+
+	assertTransaction(t, result, err, deposit)
+}
+
+func TestTransactionRepository_FindActiveDeposit_OnlyInactiveDeposits_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	failedDeposit := newTestDeposit(t, pool, withdraw)
+	failTransaction(t, &failedDeposit)
+	insertTransactionRow(t, pool, failedDeposit)
+	cancelledDeposit := newTestDeposit(t, pool, withdraw)
+	completeTransaction(t, &cancelledDeposit, "114.50")
+	markCancelled(t, &cancelledDeposit)
+	insertTransactionRow(t, pool, cancelledDeposit)
+
+	_, err := repository.FindActiveDeposit(testContext(t), eurPlayerID, withdraw.BetID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_FindActiveDeposit_AnotherPlayersBet_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	insertTransactionRow(t, pool, newTestDeposit(t, pool, withdraw))
+
+	_, err := repository.FindActiveDeposit(testContext(t), usdPlayerID, withdraw.BetID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
+func TestTransactionRepository_FindActiveDeposit_OnlyTheWithdrawOfTheBet_ReturnsTransactionNotFound(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	completeTransaction(t, &withdraw, "89.50")
+	insertTransactionRow(t, pool, withdraw)
+
+	_, err := repository.FindActiveDeposit(testContext(t), eurPlayerID, withdraw.BetID)
+
+	assertErrorIs(t, err, domain.ErrTransactionNotFound)
+}
+
 func TestTransactionRepository_Update_CompletedTransaction_StoresStatusNewBalanceAndUpdatedAt(t *testing.T) {
 	pool := migratedTestDatabase(t)
 	repository := newTransactionRepository(pool)

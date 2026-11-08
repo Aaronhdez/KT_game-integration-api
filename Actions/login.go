@@ -45,24 +45,24 @@ func NewLoginCommandHandler(players domain.PlayerRepository, hasher domain.Passw
 }
 
 // Execute handles the login command, verifying credentials and issuing a token.
-func (l *LoginCommandHandler) Execute(ctx context.Context, command LoginCommand) (LoginResult, error) {
+func (handler *LoginCommandHandler) Execute(ctx context.Context, command LoginCommand) (LoginResult, error) {
 	if command.Username == "" || command.Password == "" {
 		return LoginResult{}, domain.ErrMissingCredentials
 	}
-	player, err := l.players.FindByUsername(ctx, command.Username)
+	player, err := handler.players.FindByUsername(ctx, command.Username)
 	if errors.Is(err, domain.ErrPlayerNotFound) {
-		_ = l.hasher.Verify(dummyPasswordHash, command.Password)
+		_ = handler.hasher.Verify(dummyPasswordHash, command.Password)
 		return LoginResult{}, domain.ErrInvalidCredentials
 	}
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("login: %w", err)
 	}
 
-	if err := l.hasher.Verify(player.PasswordHash, command.Password); err != nil {
+	if err := handler.hasher.Verify(player.PasswordHash, command.Password); err != nil {
 		return LoginResult{}, fmt.Errorf("login: %w", err)
 	}
 
-	issued, err := l.tokens.Issue(player.UserID, l.clock.Now())
+	issued, err := handler.tokens.Issue(player.UserID, handler.clock.Now())
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("login: %w", err)
 	}

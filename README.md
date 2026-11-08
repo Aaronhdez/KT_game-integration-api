@@ -250,8 +250,41 @@ amount greater than zero settles it as `WON`; `0` settles it as `LOST`, is
 | `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":"PLACED"` (resolution: Phase 11) |
 | `400` | Missing or invalid field (a missing `amount` is not `0`), negative amount, more than 2 decimals, or a currency that is not the player's / the withdraw's |
 | `404` | The referenced withdraw does not exist, belongs to another player, or is not a withdraw |
-| `409` | The withdraw is not `COMPLETED`; the bet is already settled, cancelled or has another deposit in progress; same `providerTransactionId` with another payload or used by another player; or a retry of a deposit that ended `FAILED` |
+| `409` | The withdraw is not `COMPLETED` or has a cancel in progress; the bet is already settled, cancelled or has another deposit in progress; same `providerTransactionId` with another payload or used by another player; or a retry of a deposit that ended `FAILED` |
 | `502` | The Wallet rejected the deposit, or the balance before it could not be read (nothing was sent) |
+
+### Cancel
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/cancel \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"providerTransactionId":"prov-tx-0001"}'
+```
+
+`201` with `Cache-Control: no-store`:
+
+```json
+{"transactionId":"1f4b2c3d-6e7a-4b8c-9d0e-a1b2c3d4e5f6","providerTransactionId":"prov-tx-0001","oldBalance":4989.50,"newBalance":5000.00,"status":"COMPLETED","betStatus":"CANCELLED"}
+```
+
+`providerTransactionId` is the withdraw or deposit to cancel, and the
+idempotency key. The Wallet has no rollback, so a cancel is a compensating
+operation on the same bet: a withdraw is **credited back** (the bet becomes
+`CANCELLED`), a deposit is **debited back** (the bet returns to `PLACED` and
+can be settled again). Cancelling a zero-amount deposit moves no money and is
+not sent to the Wallet. The response's `transactionId` is the cancel's own
+ID; `providerTransactionId` is the cancelled transaction's.
+
+| Status | When |
+|---|---|
+| `201` | Processed for the first time and `COMPLETED` |
+| `200` | The transaction was already cancelled: the earlier cancel in its current state, without calling the Wallet |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `betStatus` unchanged (resolution: Phase 11); a retry also answers `202` |
+| `400` | Missing or invalid `providerTransactionId` |
+| `404` | The transaction does not exist or belongs to another player |
+| `409` | The transaction is `PENDING` or `FAILED`; a withdraw whose bet is settled (cancel the deposit first) or has a deposit in progress; or a retry of a cancel that ended `FAILED` |
+| `422` | Insufficient funds to take a deposit back: the cancel is kept as `FAILED`, nothing else changes |
+| `502` | The Wallet rejected the compensation, or the balance before it could not be read (nothing was sent) |
 
 *More `curl` examples and OpenAPI spec: Phase 13.*
 

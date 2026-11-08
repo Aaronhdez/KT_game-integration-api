@@ -241,7 +241,7 @@ POST /api/v1/withdraw
 | Package / file | Content |
 |---|---|
 | `Actions/transaction_result.go` | `TransactionResult{Transaction, BetStatus *BetStatus, Replayed}`, shared by Withdraw, Deposit and Cancel |
-| `Actions/withdraw.go` | `WithdrawCommandHandler`: validation, `withdrawLocked` (replay → old balance → `PENDING` → Wallet → outcome), `replayIfProcessed`, `complete`, `fail`, `leavePending`, one log line per withdraw |
+| `Actions/withdraw.go` | `WithdrawCommandHandler`: validation, `withdrawLocked` (replay → old balance → `PENDING` → Wallet → outcome), `replayIfProcessed`, `complete` (the shared steps are in `operation`, see "Shared operation helpers") |
 | `Application/transaction_response.go` | `transactionResponse` (§7.4) and `writeTransactionResult` (§7.2 status) |
 | `Application/withdraw.go` | `WithdrawController` and its `withdrawRequest` DTO (`Amount *domain.Money`) |
 | `Shared/id` | `UUID`: `domain.IDGenerator` with the standard library's `uuid.NewV4` |
@@ -257,14 +257,51 @@ Same chain as the withdraw (`RequireAuth` → `DepositController` →
 
 | Package / file | Content |
 |---|---|
-| `Actions/operation.go` | Helpers shared by the money operations: `readOldBalance` (balance read + currency check → `ErrWalletFailure`) and `logTransaction` (one log line per operation) |
-| `Actions/deposit.go` | `DepositCommandHandler`: validation, `depositLocked` (replay → `findBetToSettle` → old balance → zero amount: `settleWithoutWallet` / otherwise `PENDING` → Wallet → outcome), `replayIfProcessed`, `replayAfterDuplicateInsert`, `complete`, `fail`, `leavePending` |
+| `Actions/deposit.go` | `DepositCommandHandler`: validation, `depositLocked` (replay → `findBetToSettle` → old balance → zero amount: `settleWithoutWallet` / otherwise `PENDING` → Wallet → outcome), `replayIfProcessed`, `replayAfterDuplicateInsert`, `complete` |
 | `Application/deposit.go` | `DepositController` and its `depositRequest` DTO (`Amount *domain.Money`) |
 | `Startup/main.go`, `router.go` | `Handlers.Deposit` = `RequireAuth(...)(DepositController)`; route `POST /api/v1/deposit` |
 
 No schema change: "one active settlement per bet" is the
 `transactions_active_settlement` index of Phase 04, mapped to
 `ErrBetAlreadySettled`.
+
+## Cancel (Phase 10)
+
+Same chain again (`RequireAuth` → `CancelController` → `CancelCommandHandler`,
+same ports, adapters and `PlayerLocker`).
+
+| Package / file | Content |
+|---|---|
+| `Actions/cancel.go` | `CancelCommandHandler`: validation, `cancelLocked` (`replayIfCancelled` → `findWhatToRevert` (lookup + `DecideCancel` + pending-deposit check) → old balance → zero deposit: `cancelWithoutWallet` / otherwise `PENDING` → `sendCompensation` → outcome), `replayAfterDuplicateInsert`, `applyCancel` (cancel `COMPLETED`, original `CANCELLED`, bet reverted, in memory), `complete` |
+| `Actions/deposit.go` | `checkNoCancelInProgress`: a deposit is refused while its withdraw has a `PENDING` cancel (a `COMPLETED` one has already made the bet `CANCELLED`) |
+| `Domain/ports_persistence.go` | `TransactionRepository.FindActiveDeposit(userID, betID)`: the `PENDING`/`COMPLETED` deposit of a bet (same condition as the active-settlement index) |
+| `Application/cancel.go` | `CancelController` and its `cancelRequest` DTO (`providerTransactionId` only) |
+| `Startup/main.go`, `router.go` | `Handlers.Cancel` = `RequireAuth(...)(CancelController)`; route `POST /api/v1/cancel` |
+
+No schema change: "one cancel per transaction" is the
+`transactions_single_cancel` index of Phase 04, mapped to
+`ErrAlreadyCancelled`.
+
+## Shared operation helpers (Phase 10b)
+
+The three money operations embed one `operation` struct instead of
+repeating the same fields and steps:
+
+```go
+type WithdrawCommandHandler struct { operation }   // same for Deposit and Cancel
+```
+
+| Package / file | Content |
+|---|---|
+| `Actions/operation.go` | `operation`: the six dependencies plus `name` (log message and error prefix), and the steps that are identical in the three: `readOldBalance` (balance read + currency check → `ErrWalletFailure`), `outcomeContext` (writes after the Wallet call: not cancelled with the request, `outcomeWriteTimeout`), `fail` (store `FAILED`, return the Wallet's error), `leavePending` (return the stored `PENDING`), `log` (one line per operation, with `cancelled_transaction_id` for a cancel) |
+| `Actions/wallet_outcome.go` | `classifyWalletResult(err)` → `walletApplied` / `walletAppliedBalanceUnknown` / `walletNotApplied` / `walletOutcomeUnknown`: the §9.3 rule, written once; each handler's `switch` decides what to do with each outcome |
+
+What stays in each handler is what differs: `Execute` (its validation),
+`complete` (create / settle / revert a bet), the replay rules, the business
+checks, and the derived balance when the Wallet applied an operation without
+reporting it. Embedding promotes the fields and methods (`handler.wallet`,
+`handler.fail(...)`); it is composition, not inheritance: `operation` knows
+nothing about the handler that contains it.
 
 ### Naming convention
 

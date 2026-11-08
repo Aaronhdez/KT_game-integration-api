@@ -247,6 +247,45 @@ func TestDeposit_BetWithAFailedDeposit_CompletesTheNewDeposit(t *testing.T) {
 	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
 }
 
+func TestDeposit_WithdrawWithAPendingCancel_IsTransactionPending(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionPending)))
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrTransactionPending)
+}
+
+func TestDeposit_WithdrawWithAPendingCancel_DoesNotCallTheWalletNorStoreAnything(t *testing.T) {
+	stored := theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionPending))
+	fixture := givenADepositWithStore(t, stored)
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertNoWalletCallsAndStoreHolds(t, fixture, stored)
+}
+
+// Once the cancel is COMPLETED it is no longer "in progress": the bet is
+// CANCELLED, which is the reason given.
+func TestDeposit_WithdrawCancelledByACompletedCancel_IsBetAlreadySettled(t *testing.T) {
+	fixture := givenADepositWithStore(t, storeContents{
+		transactions: []domain.Transaction{aCancelOfTheWithdraw(t, domain.TransactionCompleted), theWithdraw(t, domain.TransactionCancelled)},
+		bets:         []domain.Bet{theBet(t, domain.BetCancelled)},
+	})
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrBetAlreadySettled)
+}
+
+// A FAILED cancel was never applied: the bet can still be settled.
+func TestDeposit_WithdrawWithAFailedCancel_CompletesTheNewDeposit(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed)))
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"))
+}
+
 // Zero amount: the bet is LOST, no money moves, so the
 // deposit is not forwarded to the Wallet
 
@@ -948,6 +987,15 @@ func anEarlierDeposit(t *testing.T, status domain.TransactionStatus) domain.Tran
 	tx := aPendingDeposit(t, "30.00")
 	tx.ID = domaintest.FakeTransactionID(60)
 	tx.ProviderTransactionID = "prov-tx-0003"
+	tx.Status = status
+	return tx
+}
+
+// aCancelOfTheWithdraw is a cancel of theWithdraw in the given status. Its
+// ID sorts before the withdraw's: the store returns transactions by ID.
+func aCancelOfTheWithdraw(t *testing.T, status domain.TransactionStatus) domain.Transaction {
+	t.Helper()
+	tx := domain.NewCancel(domaintest.FakeTransactionID(50), theWithdraw(t, domain.TransactionCompleted), givenAParsedMoney(t, testBalanceAfterBet), testNow)
 	tx.Status = status
 	return tx
 }
