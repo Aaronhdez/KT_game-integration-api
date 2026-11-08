@@ -17,6 +17,15 @@ type WithdrawCommand struct {
 	Currency              string
 }
 
+// withdrawRequest is a WithdrawCommand once Execute has validated it: the
+// player exists, the amount is positive and the currency is the player's
+// (player.Currency).
+type withdrawRequest struct {
+	player     domain.Player
+	providerID domain.ProviderTransactionID
+	amount     domain.Money
+}
+
 // WithdrawCommandHandler handles the execution of withdraw commands.
 type WithdrawCommandHandler struct {
 	operation
@@ -63,19 +72,14 @@ func (handler *WithdrawCommandHandler) Execute(ctx context.Context, command With
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrCurrencyMismatch)
 	}
 
+	request := withdrawRequest{player: player, providerID: providerTransactionID, amount: command.Amount}
 	return handler.runLocked(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error) {
-		return handler.withdrawLocked(ctx, uow, player, providerTransactionID, command.Amount)
+		return handler.withdrawLocked(ctx, uow, request)
 	})
 }
 
-func (handler *WithdrawCommandHandler) withdrawLocked(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	player domain.Player,
-	providerID domain.ProviderTransactionID,
-	amount domain.Money,
-) (TransactionResult, error) {
-	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
+func (handler *WithdrawCommandHandler) withdrawLocked(ctx context.Context, uow domain.UnitOfWork, request withdrawRequest) (TransactionResult, error) {
+	if result, found, err := handler.replayIfProcessed(ctx, uow, request); found || err != nil {
 		if err == nil && result.Transaction.Status == domain.TransactionPending {
 			// A retry of a PENDING withdraw re-sends it, if it is due.
 			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
@@ -83,7 +87,7 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 		return result, err
 	}
 
-	oldBalance, err := handler.readOldBalance(ctx, player)
+	oldBalance, err := handler.readOldBalance(ctx, request.player)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
@@ -96,11 +100,11 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 		}
 		pending, err = domain.NewWithdraw(domain.TransactionDetails{
 			ID:                    handler.ids.NewTransactionID(),
-			UserID:                player.UserID,
+			UserID:                request.player.UserID,
 			BetID:                 betID,
-			ProviderTransactionID: providerID,
-			Amount:                amount,
-			Currency:              player.Currency,
+			ProviderTransactionID: request.providerID,
+			Amount:                request.amount,
+			Currency:              request.player.Currency,
 			OldBalance:            oldBalance,
 		}, handler.clock.Now())
 		if err != nil {
@@ -110,7 +114,7 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	})
 
 	if errors.Is(err, domain.ErrTransactionExists) {
-		if result, found, lookupErr := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
+		if result, found, lookupErr := handler.replayIfProcessed(ctx, uow, request); found || lookupErr != nil {
 			return result, lookupErr
 		}
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrTransactionExists)
@@ -204,25 +208,19 @@ func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.
 	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
 }
 
-// replayIfProcessed looks for a transaction already stored for providerID.
-// found is false when there is none. When there is one, the stored result is
-// returned without any Wallet call.
+// replayIfProcessed looks for a transaction already stored for the request's
+// provider ID. found is false when there is none. When there is one, the
+// stored result is returned without any Wallet call.
 //   - not a withdraw, or another amount or currency → ErrIdempotencyConflict (409);
 //   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
-func (handler *WithdrawCommandHandler) replayIfProcessed(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	userID domain.UserID,
-	providerID domain.ProviderTransactionID,
-	amount domain.Money,
-	currency domain.Currency,
-) (TransactionResult, bool, error) {
+func (handler *WithdrawCommandHandler) replayIfProcessed(ctx context.Context, uow domain.UnitOfWork, request withdrawRequest) (TransactionResult, bool, error) {
+	userID := request.player.UserID
 	var result TransactionResult
 	found := false
 	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, providerID)
+		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, request.providerID)
 		if errors.Is(err, domain.ErrTransactionNotFound) {
 			return nil
 		}
@@ -232,7 +230,7 @@ func (handler *WithdrawCommandHandler) replayIfProcessed(
 		found = true
 
 		if previous.Type != domain.TransactionWithdraw ||
-			!previous.Amount.Equal(amount) || previous.Currency != currency {
+			!previous.Amount.Equal(request.amount) || previous.Currency != request.player.Currency {
 			return domain.ErrIdempotencyConflict
 		}
 

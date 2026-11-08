@@ -18,6 +18,16 @@ type DepositCommand struct {
 	Currency                       string
 }
 
+// depositRequest is a DepositCommand once Execute has validated it: the
+// player exists and the currency is the player's (player.Currency). The
+// amount may be zero (a LOST bet).
+type depositRequest struct {
+	player      domain.Player
+	providerID  domain.ProviderTransactionID
+	withdrawnID domain.ProviderTransactionID
+	amount      domain.Money
+}
+
 // DepositCommandHandler handles the execution of deposit commands.
 type DepositCommandHandler struct {
 	operation
@@ -66,21 +76,14 @@ func (handler *DepositCommandHandler) Execute(ctx context.Context, command Depos
 		return TransactionResult{}, fmt.Errorf("deposit: %w", domain.ErrCurrencyMismatch)
 	}
 
+	request := depositRequest{player: player, providerID: providerTransactionID, withdrawnID: withdrawnID, amount: command.Amount}
 	return handler.runLocked(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error) {
-		return handler.depositLocked(ctx, uow, player, providerTransactionID, withdrawnID, command.Amount, currency)
+		return handler.depositLocked(ctx, uow, request)
 	})
 }
 
-func (handler *DepositCommandHandler) depositLocked(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	player domain.Player,
-	providerID domain.ProviderTransactionID,
-	withdrawnID domain.ProviderTransactionID,
-	amount domain.Money,
-	currency domain.Currency,
-) (TransactionResult, error) {
-	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency); found || err != nil {
+func (handler *DepositCommandHandler) depositLocked(ctx context.Context, uow domain.UnitOfWork, request depositRequest) (TransactionResult, error) {
+	if result, found, err := handler.replayIfProcessed(ctx, uow, request); found || err != nil {
 		if err == nil && result.Transaction.Status == domain.TransactionPending {
 			// A retry of a PENDING deposit re-sends it, if it is due.
 			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
@@ -90,30 +93,30 @@ func (handler *DepositCommandHandler) depositLocked(
 
 	// Under the lock: no other operation of the player can settle or cancel
 	// the bet between this check and the deposit being stored.
-	bet, err := handler.findBetToSettle(ctx, uow, player.UserID, withdrawnID, amount, currency)
+	bet, err := handler.findBetToSettle(ctx, uow, request)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("deposit: %w", err)
 	}
 
-	oldBalance, err := handler.readOldBalance(ctx, player)
+	oldBalance, err := handler.readOldBalance(ctx, request.player)
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("deposit: %w", err)
 	}
 
 	pending := domain.NewDeposit(domain.TransactionDetails{
 		ID:                    handler.ids.NewTransactionID(),
-		UserID:                player.UserID,
+		UserID:                request.player.UserID,
 		BetID:                 bet.ID,
-		ProviderTransactionID: providerID,
-		Amount:                amount,
-		Currency:              player.Currency,
+		ProviderTransactionID: request.providerID,
+		Amount:                request.amount,
+		Currency:              request.player.Currency,
 		OldBalance:            oldBalance,
 	}, handler.clock.Now())
 
-	if amount.IsZero() {
+	if request.amount.IsZero() {
 		result, err := handler.settleWithoutWallet(ctx, uow, pending, bet)
 		if isDuplicateDeposit(err) {
-			return handler.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency, err)
+			return handler.replayAfterDuplicateInsert(ctx, uow, request, err)
 		}
 		return result, err
 	}
@@ -122,7 +125,7 @@ func (handler *DepositCommandHandler) depositLocked(
 		return repos.Transactions.Insert(ctx, pending)
 	})
 	if isDuplicateDeposit(err) {
-		return handler.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency, err)
+		return handler.replayAfterDuplicateInsert(ctx, uow, request, err)
 	}
 	if err != nil {
 		return TransactionResult{}, insertDepositError("store pending", err)
@@ -240,17 +243,8 @@ func isDuplicateDeposit(err error) bool {
 // deposit settles the bet: the insert error stands (409). Both indexes are
 // checked because PostgreSQL does not say which one it reports first when a
 // row breaks the two.
-func (handler *DepositCommandHandler) replayAfterDuplicateInsert(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	userID domain.UserID,
-	providerID domain.ProviderTransactionID,
-	withdrawnID domain.ProviderTransactionID,
-	amount domain.Money,
-	currency domain.Currency,
-	insertErr error,
-) (TransactionResult, error) {
-	if result, found, err := handler.replayIfProcessed(ctx, uow, userID, providerID, withdrawnID, amount, currency); found || err != nil {
+func (handler *DepositCommandHandler) replayAfterDuplicateInsert(ctx context.Context, uow domain.UnitOfWork, request depositRequest, insertErr error) (TransactionResult, error) {
+	if result, found, err := handler.replayIfProcessed(ctx, uow, request); found || err != nil {
 		return result, err
 	}
 	if errors.Is(insertErr, domain.ErrTransactionExists) {
@@ -260,9 +254,9 @@ func (handler *DepositCommandHandler) replayAfterDuplicateInsert(
 	return TransactionResult{}, insertDepositError("store", insertErr)
 }
 
-// replayIfProcessed looks for a deposit already stored for providerID. found
-// is false when there is none. When there is one, the stored result is
-// returned without any Wallet call:
+// replayIfProcessed looks for a deposit already stored for the request's
+// provider ID. found is false when there is none. When there is one, the
+// stored result is returned without any Wallet call:
 //   - not a deposit, or another amount, currency or withdraw →
 //     ErrIdempotencyConflict (409);
 //   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
@@ -271,19 +265,12 @@ func (handler *DepositCommandHandler) replayAfterDuplicateInsert(
 //
 // "Same withdraw" is checked through the bet: every withdraw has its own bet,
 // and the deposit stores the bet it settles.
-func (handler *DepositCommandHandler) replayIfProcessed(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	userID domain.UserID,
-	providerID domain.ProviderTransactionID,
-	withdrawnID domain.ProviderTransactionID,
-	amount domain.Money,
-	currency domain.Currency,
-) (TransactionResult, bool, error) {
+func (handler *DepositCommandHandler) replayIfProcessed(ctx context.Context, uow domain.UnitOfWork, request depositRequest) (TransactionResult, bool, error) {
+	userID := request.player.UserID
 	var result TransactionResult
 	found := false
 	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, providerID)
+		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, request.providerID)
 		if errors.Is(err, domain.ErrTransactionNotFound) {
 			return nil
 		}
@@ -293,10 +280,10 @@ func (handler *DepositCommandHandler) replayIfProcessed(
 		found = true
 
 		if previous.Type != domain.TransactionDeposit ||
-			!previous.Amount.Equal(amount) || previous.Currency != currency {
+			!previous.Amount.Equal(request.amount) || previous.Currency != request.player.Currency {
 			return domain.ErrIdempotencyConflict
 		}
-		withdraw, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, withdrawnID)
+		withdraw, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, request.withdrawnID)
 		if errors.Is(err, domain.ErrTransactionNotFound) {
 			return domain.ErrIdempotencyConflict
 		}
@@ -376,31 +363,25 @@ func checkNoCancelInProgress(ctx context.Context, repos domain.Repositories, use
 	return fmt.Errorf("%w: the withdraw has a cancel in progress", domain.ErrTransactionPending)
 }
 
-// findBetToSettle returns the bet of the withdraw referenced by withdrawnID,
-// which this deposit can settle:
+// findBetToSettle returns the bet of the withdraw referenced by the request's
+// withdrawnID, which this deposit can settle:
 //   - unknown, another player's, or not a withdraw → ErrTransactionNotFound (404);
 //   - in another currency than the deposit → ErrCurrencyMismatch (400);
 //   - PENDING or FAILED → ErrWithdrawNotCompleted (409);
 //   - with a cancel in progress → ErrTransactionPending (409);
 //   - its bet already settled or cancelled → ErrBetAlreadySettled (409).
-func (handler *DepositCommandHandler) findBetToSettle(
-	ctx context.Context,
-	uow domain.UnitOfWork,
-	userID domain.UserID,
-	withdrawnID domain.ProviderTransactionID,
-	amount domain.Money,
-	currency domain.Currency,
-) (domain.Bet, error) {
+func (handler *DepositCommandHandler) findBetToSettle(ctx context.Context, uow domain.UnitOfWork, request depositRequest) (domain.Bet, error) {
+	userID := request.player.UserID
 	var bet domain.Bet
 	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		withdraw, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, withdrawnID)
+		withdraw, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, request.withdrawnID)
 		if err != nil {
 			return err
 		}
 		if withdraw.Type != domain.TransactionWithdraw {
 			return domain.ErrTransactionNotFound
 		}
-		if withdraw.Currency != currency {
+		if withdraw.Currency != request.player.Currency {
 			return domain.ErrCurrencyMismatch
 		}
 		if withdraw.Status == domain.TransactionPending || withdraw.Status == domain.TransactionFailed {
@@ -417,7 +398,7 @@ func (handler *DepositCommandHandler) findBetToSettle(
 		// The bet rule lives in the domain: settle a copy to ask whether the
 		// bet can be settled. Nothing is stored here.
 		settled := bet
-		return settled.Settle(amount, handler.clock.Now())
+		return settled.Settle(request.amount, handler.clock.Now())
 	})
 	if err != nil {
 		return domain.Bet{}, err
