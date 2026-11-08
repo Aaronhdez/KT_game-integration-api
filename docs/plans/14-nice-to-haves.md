@@ -1,8 +1,8 @@
 # 14 — Nice-to-haves (after delivery)
 
-> **Status: draft, written point by point.** Point 1 is ready for review;
-> points 2–4 are only outlined and will be detailed one at a time, each one
-> approved before the next is written.
+> **Status: written point by point.** Point 1 is **built** (branch
+> `refactor_code_clean_up`); points 2–4 are only outlined and will be
+> detailed one at a time, each one approved before the next is written.
 
 ## Goal
 
@@ -117,6 +117,19 @@ literal) that captures variables, the Go equivalent of a C# lambda (R2).
    behaviour as now).
 3. ~~Working mode?~~ **Resolved:** Claude writes each step and the developer
    reviews it before it is committed (as in Phases 09–13).
+
+### As built — deviations from this plan (Point 1)
+
+| Planned | Built | Why |
+|---|---|---|
+| R3: `type outcome string` | `type logOutcome int` with `iota` and a `String()` method, in `Actions/log_outcome.go` | An untyped string literal converts silently to a named string type, so `"pendng"` would still compile; it cannot convert to an `int` type. Same shape as `walletOutcome`; the name avoids confusing the two. Log values unchanged (the tests that read the log pass untouched). |
+| R1: `depositRequest` with a `currency` field | No `currency` field: the code uses `request.player.Currency` | `Execute` has already checked they are equal; two fields could contradict each other. |
+| R5: `replayOrResend` makes the handlers shorter | It adds ~45 lines (one 12-line helper per handler) | Each handler has its own lookup and `resendPending`; sharing the helper would need function parameters or generics, rejected in Phases 09/10b. Kept for readability: each `xxxLocked` now starts with one `if … handled` and the re-send rule has a name. |
+| — | Typo fixed in a `cancel.go` comment ("findWhatToRevertthen") | Found while editing; committed with R1. |
+
+Commits: `docs(plan)` → `feat(domain)` R4 → `refactor(actions)` R4, R3, R2,
+R1, R5 → `docs(architecture)`. No existing test was modified; `go test ./...`
+green after every step. `resolve_pending.go` untouched (Point 3).
 
 ---
 

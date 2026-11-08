@@ -123,7 +123,7 @@ domain error to its HTTP code (`writeDomainError`, with `errors.Is`).
 
 | Type | Purpose | Rules enforced in `Domain` |
 |---|---|---|
-| `Money` | Exact amount (`shopspring/decimal`, unexported field) | ≥ 0, ≤ 2 decimals, ≤ 18 integer digits; JSON number in and out, never `float64` |
+| `Money` | Exact amount (`shopspring/decimal`, unexported field) | ≥ 0, ≤ 2 decimals, ≤ 18 integer digits; JSON number in and out, never `float64`; `Add`/`Sub` re-check the result |
 | `Currency` | `USD`, `EUR`, `KES` | exact uppercase codes only |
 | `UserID`, `BetID`, `TransactionID`, `ProviderTransactionID` | Named ID types | the compiler refuses to mix them; provider ID non-empty, ≤ 128 characters |
 | `Bet` | A wager, created when its withdraw completes | `PLACED → WON/LOST` (`Settle`), `PLACED → CANCELLED` (`Cancel`), `WON/LOST → PLACED` (`RevertSettlement`) |
@@ -197,10 +197,18 @@ scan of `PENDING` rows.
 ## Shared code of the money operations
 
 The three operation handlers embed one `operation` struct (`Actions/operation.go`)
-with the common dependencies and steps: read `oldBalance`, store `FAILED`,
-leave `PENDING`, log. `classifyWalletResult` (`Actions/wallet_outcome.go`)
-holds the applied / not applied / unknown rule once. Embedding is composition,
-not inheritance: `operation` knows nothing about the handler that contains it.
+with the common dependencies and steps: run under the player's lock
+(`runLocked`), read `oldBalance`, store `FAILED`, leave `PENDING`, log (with a
+typed `logOutcome`, `Actions/log_outcome.go`). `classifyWalletResult`
+(`Actions/wallet_outcome.go`) holds the applied / not applied / unknown rule
+once. Embedding is composition, not inheritance: `operation` knows nothing
+about the handler that contains it.
+
+Each handler's `Execute` validates its command into an unexported request
+(`withdrawRequest`, `depositRequest`, `cancelRequest`) that the rest of the
+handler receives. Its locked step starts with `replayOrResend`: a known
+provider ID gets its stored result, or a re-send if it is `PENDING`; only a
+new one goes on to a new transaction.
 
 **Pending resolution** reuses the same path: a provider retry and the
 background resolver both call the handler's `resendPending`, which re-sends the
