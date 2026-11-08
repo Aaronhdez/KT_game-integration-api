@@ -15,6 +15,7 @@ type Handlers struct {
 	Player   http.Handler // already wrapped in RequireAuth by newHandlers
 	Withdraw http.Handler // already wrapped in RequireAuth by newHandlers
 	Deposit  http.Handler // already wrapped in RequireAuth by newHandlers
+	Cancel   http.Handler // already wrapped in RequireAuth by newHandlers
 }
 
 func NewRouter(logger *slog.Logger, handlers Handlers) http.Handler {
@@ -24,6 +25,7 @@ func NewRouter(logger *slog.Logger, handlers Handlers) http.Handler {
 	router.Handle("GET /api/v1/player", handlers.Player)
 	router.Handle("POST /api/v1/withdraw", handlers.Withdraw)
 	router.Handle("POST /api/v1/deposit", handlers.Deposit)
+	router.Handle("POST /api/v1/cancel", handlers.Cancel)
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		application.WriteError(w, http.StatusNotFound, application.CodeNotFound, "resource not found")
 	})

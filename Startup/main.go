@@ -143,12 +143,14 @@ func newHandlers(cfg Config, pool *pgxpool.Pool, logger *slog.Logger) Handlers {
 	getPlayer := queries.NewGetPlayerQueryHandler(players, walletClient)
 	withdraw := actions.NewWithdrawCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
 	deposit := actions.NewDepositCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
+	cancel := actions.NewCancelCommandHandler(players, playerLocker, walletClient, id.UUID{}, systemClock, logger)
 
 	return Handlers{
 		Login:    application.NewLoginController(login, logger),
 		Player:   requireAuth(application.NewPlayerController(getPlayer, logger)),
 		Withdraw: requireAuth(application.NewWithdrawController(withdraw, logger)),
 		Deposit:  requireAuth(application.NewDepositController(deposit, logger)),
+		Cancel:   requireAuth(application.NewCancelController(cancel, logger)),
 	}
 }
 

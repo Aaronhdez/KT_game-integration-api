@@ -83,6 +83,18 @@ func TestRouter_GetDeposit_ReturnsNotFound(t *testing.T) {
 	assertStatusCode(t, recorder, http.StatusNotFound)
 }
 
+func TestRouter_PostCancel_ReachesTheCancelHandler(t *testing.T) {
+	recorder := aPOST("/api/v1/cancel")
+
+	assertStatusCode(t, recorder, cancelStubStatus)
+}
+
+func TestRouter_GetCancel_ReturnsNotFound(t *testing.T) {
+	recorder := aGET("/api/v1/cancel")
+
+	assertStatusCode(t, recorder, http.StatusNotFound)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // Each stub answers an unusual status of its own, so a test can tell which
@@ -92,6 +104,7 @@ const (
 	playerStubStatus   = http.StatusAccepted
 	withdrawStubStatus = http.StatusNonAuthoritativeInfo
 	depositStubStatus  = http.StatusResetContent
+	cancelStubStatus   = http.StatusPartialContent
 )
 
 func stubHandlers() Handlers {
@@ -100,6 +113,7 @@ func stubHandlers() Handlers {
 		Player:   statusStub(playerStubStatus),
 		Withdraw: statusStub(withdrawStubStatus),
 		Deposit:  statusStub(depositStubStatus),
+		Cancel:   statusStub(cancelStubStatus),
 	}
 }
 
