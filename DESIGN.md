@@ -261,6 +261,8 @@ observed.
 **With more time I would:** handle a cancel that arrives before its
 withdraw (store it so the late withdraw is refused or reverted); replace the
 resolver's scan with a PostgreSQL job queue (per-transaction backoff,
-several instances); add metrics and alerts on `PENDING` age instead of log
-lines; add a readiness check that includes the database; add refresh tokens,
-revocation and login rate limiting.
+several instances); add OpenTelemetry traces and metrics, with alerts on
+`PENDING` age instead of log lines; serve Swagger UI from the API; add a
+readiness check that includes the database; add refresh tokens, revocation
+and login rate limiting. The job queue, telemetry and Swagger UI are
+designed in [`docs/plans/14-nice-to-haves.md`](docs/plans/14-nice-to-haves.md).
