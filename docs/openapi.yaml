@@ -1,0 +1,681 @@
+openapi: 3.1.0
+info:
+  title: Game Integration API
+  version: 1.0.0
+  description: |
+    Lets third-party casino games place (withdraw), settle (deposit) and
+    revert (cancel) bets on behalf of players, keeping our records consistent
+    with an unreliable Wallet service.
+
+    **Money.** Amounts are JSON numbers with at most two decimals. They are
+    decoded exactly (never through binary floating point); a string, `null`, a
+    negative number or a third decimal is a `400`. Responses always write two
+    decimals (`4989.50`).
+
+    **Idempotency.** Withdraw, deposit and cancel are idempotent. The key is
+    `providerTransactionId` (for cancel, the ID of the transaction being
+    cancelled). The same key with the same payload returns the stored result
+    in its current state (`200`) without calling the Wallet; another payload
+    is a `409`.
+
+    **Unknown outcomes.** When the Wallet's outcome is unknown (a `500`, a
+    dropped connection, a timeout) the transaction stays `PENDING` and the
+    answer is `202`. It is resolved by re-sending the identical request to the
+    Wallet, triggered by a retry of the same request (at least 10 s after the
+    last attempt) or by a background resolver. See `DESIGN.md` §2.
+
+    Every error has the body `{"code": "...", "message": "..."}`.
+servers:
+  - url: http://localhost:8080
+    description: Local (docker compose up)
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+    description: Login of the seeded players.
+  - name: Player
+    description: The authenticated player's information.
+  - name: Bets
+    description: Money operations on the player's bets; idempotent by provider transaction ID.
+  - name: Operations
+    description: Endpoints for operating the service.
+
+paths:
+  /health:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Liveness check
+      description: Reports that the process is up. It does not check the database or the Wallet.
+      security: []
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Get a JWT
+      description: |
+        Checks the credentials of a seeded player and returns an HS256 JWT
+        whose subject is the player's wallet user ID. An unknown username and a
+        wrong password get the same `401`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: player_usd
+              password: usd-pass-2026
+      responses:
+        '200':
+          description: Logged in.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzNDYzMzA4OTQ4NiJ9.signature
+                tokenType: Bearer
+                expiresAt: '2026-11-07T22:57:53Z'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          description: Unknown username or wrong password (same answer for both).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: UNAUTHORIZED
+                message: invalid credentials or token
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/player:
+    get:
+      tags: [Player]
+      operationId: getPlayer
+      summary: Player information and live balance
+      description: |
+        The player comes from the token. The balance is read from the Wallet
+        on every request and never cached, so the answer can take several
+        seconds; if the Wallet cannot be read the answer is `502` or `504`,
+        never a stale balance.
+      responses:
+        '200':
+          description: The player and their current Wallet balance.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerResponse'
+              example:
+                userId: 34633089486
+                balance: 5000.00
+                currency: USD
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The token's player does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: NOT_FOUND
+                message: resource not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: The Wallet failed, or reported a currency different from the player's account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: WALLET_ERROR
+                message: wallet error
+        '504':
+          description: The Wallet did not answer in time (each read is retried once).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: WALLET_TIMEOUT
+                message: wallet did not answer in time
+
+  /api/v1/withdraw:
+    post:
+      tags: [Bets]
+      operationId: withdraw
+      summary: Place a bet (take the stake)
+      description: |
+        Takes `amount` from the token's player and, once the Wallet confirms
+        it, creates a bet in status `PLACED`. The transaction is stored as
+        `PENDING` before the Wallet is called.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WithdrawRequest'
+            example:
+              currency: USD
+              amount: 10.50
+              providerTransactionId: prov-tx-0001
+      responses:
+        '201':
+          description: Processed for the first time and `COMPLETED`; the bet is `PLACED`.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 9bfc9dae-87f4-4270-83e1-fe8fbd2d7cee
+                providerTransactionId: prov-tx-0001
+                oldBalance: 5000.00
+                newBalance: 4989.50
+                status: COMPLETED
+                betStatus: PLACED
+        '200':
+          description: |
+            Replay (same key and payload): the stored result in its current
+            state (e.g. `CANCELLED` if it was cancelled since), without calling
+            the Wallet; or a retry that resolved a `PENDING` withdraw.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '202':
+          description: The Wallet's outcome is unknown; the transaction is `PENDING` and the bet is not placed yet.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 9bfc9dae-87f4-4270-83e1-fe8fbd2d7cee
+                providerTransactionId: prov-tx-0001
+                oldBalance: 5000.00
+                newBalance: null
+                status: PENDING
+                betStatus: null
+        '400':
+          description: Missing or invalid field, amount not greater than zero, more than 2 decimals, or a currency that is not the player's.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INVALID_REQUEST
+                message: 'withdraw: invalid input: currency does not match'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Same `providerTransactionId` with another payload, or an ID already used by another player.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/InsufficientFunds'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/WalletError'
+
+  /api/v1/deposit:
+    post:
+      tags: [Bets]
+      operationId: deposit
+      summary: Settle a bet (pay the outcome)
+      description: |
+        Settles the bet of the withdraw `providerWithdrawnTransactionId`. An
+        amount greater than zero settles it as `WON`; `0` settles it as `LOST`,
+        is not sent to the Wallet (no money moves) and answers `201` with
+        `oldBalance` = `newBalance`. A bet has at most one active settlement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepositRequest'
+            example:
+              currency: USD
+              amount: 25.00
+              providerTransactionId: prov-tx-0002
+              providerWithdrawnTransactionId: prov-tx-0001
+      responses:
+        '201':
+          description: Processed for the first time and `COMPLETED`; the bet is `WON` or `LOST`.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 5d0c6f8e-2a41-4c1b-9f7e-3b8a6d2e1c40
+                providerTransactionId: prov-tx-0002
+                oldBalance: 4989.50
+                newBalance: 5014.50
+                status: COMPLETED
+                betStatus: WON
+        '200':
+          description: |
+            Replay (same key and payload): the stored result in its current
+            state, without calling the Wallet; or a retry that resolved a
+            `PENDING` deposit.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '202':
+          description: The Wallet's outcome is unknown; the transaction is `PENDING` and the bet stays `PLACED` until it is confirmed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 5d0c6f8e-2a41-4c1b-9f7e-3b8a6d2e1c40
+                providerTransactionId: prov-tx-0002
+                oldBalance: 4989.50
+                newBalance: null
+                status: PENDING
+                betStatus: PLACED
+        '400':
+          description: Missing or invalid field (a missing `amount` is not `0`), negative amount, more than 2 decimals, or a currency that is not the player's or the withdraw's.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The referenced withdraw does not exist, belongs to another player, or is not a withdraw.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: NOT_FOUND
+                message: resource not found
+        '409':
+          description: |
+            The withdraw is not `COMPLETED` or has a cancel in progress; the
+            bet is already settled, cancelled or has another deposit in
+            progress; or the same `providerTransactionId` with another payload
+            or used by another player.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/WalletError'
+
+  /api/v1/cancel:
+    post:
+      tags: [Bets]
+      operationId: cancel
+      summary: Revert a withdraw or deposit
+      description: |
+        The Wallet has no rollback, so a cancel is a compensating operation on
+        the same bet: a withdraw is credited back (the bet becomes
+        `CANCELLED`), a deposit is debited back (the bet returns to `PLACED`).
+        Cancelling a zero-amount deposit moves no money and is not sent to the
+        Wallet. The response's `transactionId` is the cancel's own ID;
+        `providerTransactionId` is the cancelled transaction's.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+            example:
+              providerTransactionId: prov-tx-0001
+      responses:
+        '201':
+          description: Processed for the first time and `COMPLETED`.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 1f4b2c3d-6e7a-4b8c-9d0e-a1b2c3d4e5f6
+                providerTransactionId: prov-tx-0001
+                oldBalance: 4989.50
+                newBalance: 5000.00
+                status: COMPLETED
+                betStatus: CANCELLED
+        '200':
+          description: |
+            The transaction was already cancelled: the earlier cancel in its
+            current state, without calling the Wallet; or a retry that
+            resolved a `PENDING` cancel.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '202':
+          description: The Wallet's outcome is unknown; the cancel is `PENDING`, the original and its bet are unchanged.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                transactionId: 1f4b2c3d-6e7a-4b8c-9d0e-a1b2c3d4e5f6
+                providerTransactionId: prov-tx-0001
+                oldBalance: 4989.50
+                newBalance: null
+                status: PENDING
+                betStatus: PLACED
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The transaction does not exist or belongs to another player.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: NOT_FOUND
+                message: resource not found
+        '409':
+          description: |
+            The transaction is `PENDING` or `FAILED`; or a withdraw whose bet
+            is settled (cancel the deposit first) or has a deposit in progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/InsufficientFunds'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/WalletError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'The `token` returned by `POST /api/v1/auth/login`, sent as `Authorization: Bearer <token>`.'
+
+  headers:
+    CacheControlNoStore:
+      description: The body carries a token or balances and must not be cached.
+      schema:
+        type: string
+        const: no-store
+
+  schemas:
+    Money:
+      type: number
+      minimum: 0
+      exclusiveMaximum: 1000000000000000000
+      multipleOf: 0.01
+      description: |
+        Amount with at most two decimals, decoded exactly (never as binary
+        floating point). A string, `null`, a negative value or a third decimal
+        is rejected with `400` (never rounded).
+      examples: [10.50]
+
+    Currency:
+      type: string
+      enum: [USD, EUR, KES]
+      description: Exact code; `usd` or `" USD"` are rejected.
+
+    ProviderTransactionId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      description: Generated by the provider; unique across the whole system and used as the idempotency key.
+      examples: [prov-tx-0001]
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [token, tokenType, expiresAt]
+      properties:
+        token:
+          type: string
+          description: HS256 JWT; `sub` is the wallet user ID; expires after `JWT_TTL`.
+        tokenType:
+          type: string
+          const: Bearer
+        expiresAt:
+          type: string
+          format: date-time
+          description: Expiry of the token, UTC, RFC 3339.
+
+    PlayerResponse:
+      type: object
+      required: [userId, balance, currency]
+      properties:
+        userId:
+          type: integer
+          format: int64
+          description: Wallet user ID (exceeds 32 bits).
+        balance:
+          $ref: '#/components/schemas/Money'
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    WithdrawRequest:
+      type: object
+      required: [currency, amount, providerTransactionId]
+      properties:
+        currency:
+          $ref: '#/components/schemas/Currency'
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          exclusiveMinimum: 0
+          description: Stake; must be greater than zero.
+        providerTransactionId:
+          $ref: '#/components/schemas/ProviderTransactionId'
+
+    DepositRequest:
+      type: object
+      required: [currency, amount, providerTransactionId, providerWithdrawnTransactionId]
+      properties:
+        currency:
+          $ref: '#/components/schemas/Currency'
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Winnings; `0` settles the bet as `LOST`, anything greater as `WON`.
+        providerTransactionId:
+          $ref: '#/components/schemas/ProviderTransactionId'
+        providerWithdrawnTransactionId:
+          allOf:
+            - $ref: '#/components/schemas/ProviderTransactionId'
+          description: The withdraw whose bet is settled; a `COMPLETED` withdraw of the same player.
+
+    CancelRequest:
+      type: object
+      required: [providerTransactionId]
+      properties:
+        providerTransactionId:
+          allOf:
+            - $ref: '#/components/schemas/ProviderTransactionId'
+          description: The withdraw or deposit to cancel; also the idempotency key.
+
+    TransactionResponse:
+      type: object
+      description: Body of withdraw, deposit and cancel (assessment §7.4).
+      required: [transactionId, providerTransactionId, oldBalance, newBalance, status, betStatus]
+      properties:
+        transactionId:
+          type: string
+          format: uuid
+          description: Generated by this service for this transaction (for a cancel, the cancel's own ID).
+        providerTransactionId:
+          type: string
+          description: The provider's ID from the request; for a cancel, the ID of the cancelled transaction.
+        oldBalance:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: The balance before the operation, read from the Wallet under the player's lock.
+        newBalance:
+          type: [number, 'null']
+          minimum: 0
+          multipleOf: 0.01
+          description: The balance after the Wallet confirmed the operation; `null` while `PENDING`.
+        status:
+          type: string
+          enum: [COMPLETED, PENDING, CANCELLED]
+          description: |
+            `COMPLETED` or `PENDING`. A replay returns the current state, so a
+            withdraw or deposit cancelled since its first answer replays as
+            `CANCELLED`. `FAILED` is never returned in a success body: it is
+            answered with its error (`422` or `502`).
+        betStatus:
+          type: [string, 'null']
+          enum: [PLACED, WON, LOST, CANCELLED, null]
+          description: The bet's status after the operation; `null` while a withdraw is `PENDING` (the bet is not placed yet).
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - UNAUTHORIZED
+            - NOT_FOUND
+            - CONFLICT
+            - INSUFFICIENT_FUNDS
+            - WALLET_ERROR
+            - WALLET_TIMEOUT
+            - INTERNAL_ERROR
+          description: '`INTERNAL_ERROR` is not in the assessment: an unexpected failure (e.g. database down), details only in the logs.'
+        message:
+          type: string
+          description: Human-readable; for `400` and `409` it says what is wrong.
+
+  responses:
+    InvalidRequest:
+      description: Malformed JSON or a missing / invalid field (the message says which).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INVALID_REQUEST
+            message: 'cancel: invalid input: invalid provider transaction id: must not be empty'
+    Unauthorized:
+      description: Missing, invalid or expired token (same answer for all).
+      headers:
+        WWW-Authenticate:
+          description: Always `Bearer`.
+          schema:
+            type: string
+            const: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: invalid credentials or token
+    InsufficientFunds:
+      description: |
+        The Wallet refused the operation for insufficient funds. The
+        transaction is kept as `FAILED` and nothing else changes; a retry with
+        the same key gets `422` again without calling the Wallet.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INSUFFICIENT_FUNDS
+            message: insufficient funds
+    WalletError:
+      description: |
+        Nothing was applied: the Wallet rejected the operation (stored as
+        `FAILED`; a retry with the same key gets `502` again), or the balance
+        before it could not be read (nothing was sent or stored).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: WALLET_ERROR
+            message: wallet error
+    InternalError:
+      description: Unexpected failure (e.g. database down). Not an assessment code; details only in the logs.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INTERNAL_ERROR
+            message: internal error
