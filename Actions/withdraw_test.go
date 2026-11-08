@@ -412,13 +412,28 @@ func TestWithdraw_ReplayOfAPendingWithdraw_DoesNotCallTheWallet(t *testing.T) {
 	assertWalletCalls(t, fixture.wallet)
 }
 
-func TestWithdraw_ReplayOfAFailedWithdraw_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenAWithdraw(t)
-	fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", domain.FailureWalletRejected))
+// §7.1: same key, same result. A FAILED row without reason was stored
+// before migration 00006.
+func TestWithdraw_ReplayOfAFailedWithdraw_ReturnsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   domain.FailureReason
+		expected error
+	}{
+		{name: "insufficient funds", reason: domain.FailureInsufficientFunds, expected: domain.ErrInsufficientFunds},
+		{name: "wallet rejected", reason: domain.FailureWalletRejected, expected: domain.ErrWalletRejected},
+		{name: "no reason stored", reason: "", expected: domain.ErrPreviousAttemptFailed},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenAWithdraw(t)
+			fixture.store.PutTransaction(aFailedWithdraw(t, "10.50", testCase.reason))
 
-	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+			_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
 
-	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+			assertErrorIs(t, err, testCase.expected)
+		})
+	}
 }
 
 func TestWithdraw_ReplayOfAFailedWithdraw_DoesNotCallTheWallet(t *testing.T) {

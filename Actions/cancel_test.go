@@ -629,13 +629,27 @@ func TestCancel_ReplayOfAPendingCancel_DoesNotCallTheWallet(t *testing.T) {
 	assertNoCancelWalletCallsAndStoreHolds(t, fixture, stored)
 }
 
-// Final FAILED-retry policy: Phase 11.
-func TestCancel_ReplayOfAFailedCancel_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenACancelWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed)))
+// §7.1: same key, same result. A FAILED row without reason was stored
+// before migration 00006.
+func TestCancel_ReplayOfAFailedCancel_ReturnsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   domain.FailureReason
+		expected error
+	}{
+		{name: "insufficient funds", reason: domain.FailureInsufficientFunds, expected: domain.ErrInsufficientFunds},
+		{name: "wallet rejected", reason: domain.FailureWalletRejected, expected: domain.ErrWalletRejected},
+		{name: "no reason stored", reason: "", expected: domain.ErrPreviousAttemptFailed},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenACancelWithStore(t, theArrangedStoreWith(t, aFailedCancelOfTheWithdraw(t, testCase.reason)))
 
-	_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+			_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
 
-	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+			assertErrorIs(t, err, testCase.expected)
+		})
+	}
 }
 
 func TestCancel_ReplayOfAFailedCancel_DoesNotCallTheWalletNorStoreAnything(t *testing.T) {

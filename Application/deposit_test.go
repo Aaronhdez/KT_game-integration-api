@@ -157,6 +157,17 @@ func TestDepositController_WalletRejects_Returns502WalletError(t *testing.T) {
 	assertStatusAndCode(t, recorder, http.StatusBadGateway, CodeWalletError)
 }
 
+// §7.1: a retry of a FAILED deposit gets the same answer as the first attempt.
+func TestDepositController_RetryOfARejectedDeposit_Returns502WalletError(t *testing.T) {
+	fixture := givenADepositController(t)
+	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
+	fixture.postAs(testUserID, validDepositBody)
+
+	recorder := fixture.postAs(testUserID, validDepositBody)
+
+	assertStatusAndCode(t, recorder, http.StatusBadGateway, CodeWalletError)
+}
+
 // 504 is only for reads such as GET /player; nothing was sent yet.
 func TestDepositController_OldBalanceReadTimesOut_Returns502WalletError(t *testing.T) {
 	fixture := givenADepositController(t)

@@ -179,7 +179,7 @@ func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.
 // found is false when there is none. When there is one, the stored result is
 // returned without any Wallet call.
 //   - not a withdraw, or another amount or currency → ErrIdempotencyConflict (409);
-//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
 func (handler *WithdrawCommandHandler) replayIfProcessed(
@@ -209,7 +209,7 @@ func (handler *WithdrawCommandHandler) replayIfProcessed(
 
 		switch previous.Status {
 		case domain.TransactionFailed:
-			return domain.ErrPreviousAttemptFailed
+			return previous.FailureError()
 		case domain.TransactionPending:
 			result = TransactionResult{Transaction: previous, Replayed: true}
 			return nil

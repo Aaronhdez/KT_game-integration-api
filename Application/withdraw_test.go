@@ -118,14 +118,25 @@ func TestWithdrawController_ProviderIDOfAnotherPlayer_Returns409WithOnlyThatReas
 	assertStatusAndBody(t, recorder, http.StatusConflict, `{"code":"CONFLICT","message":"withdraw: conflict: a transaction with this provider transaction id already exists"}`)
 }
 
-func TestWithdrawController_RetryOfAFailedWithdraw_Returns409Conflict(t *testing.T) {
+// §7.1: a retry of a FAILED withdraw gets the same answer as the first attempt.
+func TestWithdrawController_RetryOfARejectedWithdraw_Returns502WalletError(t *testing.T) {
 	fixture := givenAWithdrawController(t)
 	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
 	fixture.postAs(testUserID, validWithdrawBody)
 
 	recorder := fixture.postAs(testUserID, validWithdrawBody)
 
-	assertStatusAndCode(t, recorder, http.StatusConflict, CodeConflict)
+	assertStatusAndCode(t, recorder, http.StatusBadGateway, CodeWalletError)
+}
+
+func TestWithdrawController_RetryOfAWithdrawWithInsufficientFunds_Returns422InsufficientFunds(t *testing.T) {
+	fixture := givenAWithdrawController(t)
+	tooMuch := `{"currency":"USD","amount":6000.00,"providerTransactionId":"prov-tx-0001"}`
+	fixture.postAs(testUserID, tooMuch)
+
+	recorder := fixture.postAs(testUserID, tooMuch)
+
+	assertStatusAndCode(t, recorder, http.StatusUnprocessableEntity, CodeInsufficientFunds)
 }
 
 // Wallet answers (§7.3, §8.3)

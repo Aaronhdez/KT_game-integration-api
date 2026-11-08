@@ -453,12 +453,26 @@ func TestDeposit_ReplayOfAPendingDeposit_DoesNotCallTheWallet(t *testing.T) {
 	assertWalletCalls(t, fixture.wallet)
 }
 
-func TestDeposit_ReplayOfAFailedDeposit_IsPreviousAttemptFailed(t *testing.T) {
-	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00", domain.FailureWalletRejected)))
+// §7.1: same key, same result. A FAILED row without reason was stored
+// before migration 00006.
+func TestDeposit_ReplayOfAFailedDeposit_ReturnsTheErrorOfTheFirstAttempt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		reason   domain.FailureReason
+		expected error
+	}{
+		{name: "wallet rejected", reason: domain.FailureWalletRejected, expected: domain.ErrWalletRejected},
+		{name: "no reason stored", reason: "", expected: domain.ErrPreviousAttemptFailed},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00", testCase.reason)))
 
-	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+			_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
 
-	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+			assertErrorIs(t, err, testCase.expected)
+		})
+	}
 }
 
 func TestDeposit_ReplayOfAFailedDeposit_DoesNotCallTheWallet(t *testing.T) {
@@ -998,6 +1012,13 @@ func aCancelOfTheWithdraw(t *testing.T, status domain.TransactionStatus) domain.
 	t.Helper()
 	tx := domain.NewCancel(domaintest.FakeTransactionID(50), theWithdraw(t, domain.TransactionCompleted), givenAParsedMoney(t, testBalanceAfterBet), testNow)
 	tx.Status = status
+	return tx
+}
+
+func aFailedCancelOfTheWithdraw(t *testing.T, reason domain.FailureReason) domain.Transaction {
+	t.Helper()
+	tx := aCancelOfTheWithdraw(t, domain.TransactionFailed)
+	tx.FailureReason = reason
 	return tx
 }
 

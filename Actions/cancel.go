@@ -150,7 +150,7 @@ func (handler *CancelCommandHandler) cancelLocked(
 // providerID. found is false when the transaction or its cancel does not exist;
 // findWhatToRevertthen reports an unknown transaction. When there is a cancel,
 // its stored result is returned without any Wallet call:
-//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - FAILED → the error of the first attempt (422 or 502; 409 if it has no reason);
 //   - otherwise (PENDING, COMPLETED) → its current state and its bet's
 //     (202 or 200).
 //
@@ -182,7 +182,7 @@ func (handler *CancelCommandHandler) replayIfCancelled(
 		found = true
 
 		if previous.Status == domain.TransactionFailed {
-			return domain.ErrPreviousAttemptFailed
+			return previous.FailureError()
 		}
 		bet, err := repos.Bets.FindByID(ctx, userID, original.BetID)
 		if err != nil {
