@@ -35,6 +35,9 @@ func logTransaction(logger *slog.Logger, level slog.Level, operation string, tx 
 		"amount", tx.Amount.String(),
 		"outcome", outcome,
 	}
+	if tx.CancelledTransactionID != "" {
+		attributes = append(attributes, "cancelled_transaction_id", tx.CancelledTransactionID)
+	}
 	if cause != nil {
 		attributes = append(attributes, "error", cause.Error())
 	}
