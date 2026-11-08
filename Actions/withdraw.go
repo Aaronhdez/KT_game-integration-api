@@ -80,6 +80,10 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	amount domain.Money,
 ) (TransactionResult, error) {
 	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || err != nil {
+		if err == nil && result.Transaction.Status == domain.TransactionPending {
+			// A retry of a PENDING withdraw re-sends it, if it is due.
+			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
+		}
 		return result, err
 	}
 
@@ -121,14 +125,31 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 
 	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
 	// it (docs/wallet-findings.md, Q8)
-	newBalance, walletErr := handler.wallet.Withdraw(ctx, domain.WalletOperation{
-		UserID:    player.UserID,
-		Currency:  player.Currency,
-		Amount:    amount,
-		BetID:     pending.BetID,
-		Reference: pending.ID,
-	})
+	newBalance, walletErr := handler.wallet.Withdraw(ctx, walletOperationOf(pending))
 	return handler.finish(ctx, uow, pending, newBalance, walletErr)
+}
+
+// resendPending sends a PENDING withdraw to the Wallet again, with the same
+// request as its first attempt, and stores the outcome with the same rules
+// (finish). Nothing is sent if it is not due (see startResend); the result is
+// then the transaction as stored. The caller holds the player's lock.
+func (handler *WithdrawCommandHandler) resendPending(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction) (TransactionResult, error) {
+	var current domain.Transaction
+	due := false
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		var err error
+		current, due, err = handler.startResend(ctx, repos, pending)
+		return err
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("withdraw: resend: %w", err)
+	}
+	if !due {
+		return TransactionResult{Transaction: current}, nil
+	}
+
+	newBalance, walletErr := handler.wallet.Withdraw(ctx, walletOperationOf(current))
+	return handler.finish(ctx, uow, current, newBalance, walletErr)
 }
 
 // finish stores what the Wallet's answer means for the pending withdraw

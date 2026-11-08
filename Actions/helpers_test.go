@@ -68,6 +68,46 @@ func givenACallerGivingUpAfter(t *testing.T, timeout time.Duration) context.Cont
 	return ctx
 }
 
+// resendTime is the first moment a transaction left PENDING at testNow can be
+// re-sent.
+var resendTime = testNow.Add(resendDelay)
+
+// resentAt is tx after a re-send started at the given time: UpdatedAt records
+// the last attempt (and the outcome, if any, is stored with the same time).
+func resentAt(tx domain.Transaction, at time.Time) domain.Transaction {
+	tx.UpdatedAt = at
+	return tx
+}
+
+// givenThePlayerWonElsewhereMeanwhile credits the test player in the Wallet
+// with another operation, as another game would between two attempts.
+func givenThePlayerWonElsewhereMeanwhile(t *testing.T, wallet *domaintest.FakeWallet, amount string) {
+	t.Helper()
+	if _, err := wallet.Deposit(context.Background(), anotherGamesOperation(t, amount)); err != nil {
+		t.Fatalf("arrange: credit the player elsewhere: %v", err)
+	}
+}
+
+// givenThePlayerSpentElsewhereMeanwhile debits the test player in the Wallet
+// with another operation, as another game would between two attempts.
+func givenThePlayerSpentElsewhereMeanwhile(t *testing.T, wallet *domaintest.FakeWallet, amount string) {
+	t.Helper()
+	if _, err := wallet.Withdraw(context.Background(), anotherGamesOperation(t, amount)); err != nil {
+		t.Fatalf("arrange: debit the player elsewhere: %v", err)
+	}
+}
+
+func anotherGamesOperation(t *testing.T, amount string) domain.WalletOperation {
+	t.Helper()
+	return domain.WalletOperation{
+		UserID:    testUserID,
+		Currency:  domain.USD,
+		Amount:    givenAParsedMoney(t, amount),
+		BetID:     999,
+		Reference: "another-game",
+	}
+}
+
 func betStatus(status domain.BetStatus) *domain.BetStatus {
 	return &status
 }
@@ -151,6 +191,13 @@ func assertWalletCalls(t *testing.T, wallet *domaintest.FakeWallet, want ...doma
 		if describeCall(result[i]) != describeCall(want[i]) {
 			t.Errorf("Wallet call %d: expected %s, got %s", i, describeCall(want[i]), describeCall(result[i]))
 		}
+	}
+}
+
+func assertWalletBalance(t *testing.T, wallet *domaintest.FakeWallet, want string) {
+	t.Helper()
+	if result := wallet.BalanceOf(testUserID); !result.Equal(givenAParsedMoney(t, want)) {
+		t.Errorf("expected the Wallet balance to be %s, got %s", want, result)
 	}
 }
 

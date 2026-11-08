@@ -147,6 +147,17 @@ func (tx *Transaction) FailureError() error {
 	}
 }
 
+// RecordAttempt records that the Wallet is about to be called again for this
+// PENDING transaction. UpdatedAt marks when its last attempt started, so the
+// next re-send can wait until that attempt has surely finished.
+func (tx *Transaction) RecordAttempt(now time.Time) error {
+	if tx.Status != TransactionPending {
+		return fmt.Errorf("%w: transaction %s is %s", ErrInvalidTransition, tx.ID, tx.Status)
+	}
+	tx.UpdatedAt = now
+	return nil
+}
+
 // MarkCancelled records that a completed withdraw or deposit has been reverted
 // by a Cancel. A CANCEL transaction cannot itself be cancelled.
 func (tx *Transaction) MarkCancelled(now time.Time) error {

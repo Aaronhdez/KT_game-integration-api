@@ -160,6 +160,32 @@ func TestTransaction_FailCompleted_ReturnsInvalidTransition(t *testing.T) {
 	assertErrorIs(t, err, ErrInvalidTransition)
 }
 
+// ----- RecordAttempt (the Wallet is called again for a PENDING one) -----
+
+func TestTransaction_RecordAttemptPending_MovesUpdatedAt(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	_ = result.RecordAttempt(testLater)
+
+	assertTrue(t, result.UpdatedAt.Equal(testLater), "UpdatedAt should be the time of the new attempt")
+}
+
+func TestTransaction_RecordAttemptPending_KeepsItPending(t *testing.T) {
+	result := givenAPendingWithdraw(t)
+
+	err := result.RecordAttempt(testLater)
+
+	assertTransactionTransitionTo(t, result, err, TransactionPending)
+}
+
+func TestTransaction_RecordAttemptCompleted_ReturnsInvalidTransition(t *testing.T) {
+	result := givenACompletedWithdraw(t)
+
+	err := result.RecordAttempt(testLater)
+
+	assertErrorIs(t, err, ErrInvalidTransition)
+}
+
 // ----- FailureError (what a retry of a FAILED transaction gets) -----
 
 func TestTransaction_FailureError_IsTheErrorOfTheFirstAttempt(t *testing.T) {
