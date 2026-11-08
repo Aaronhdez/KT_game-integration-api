@@ -53,6 +53,23 @@ func (o operation) readOldBalance(ctx context.Context, player domain.Player) (do
 	return balance.Amount, nil
 }
 
+// runLocked runs fn while holding the player's lock and returns its result.
+// fn receives the unit of work bound to the connection that holds the lock,
+// so every query it makes is serialised with the player's other operations.
+func (o operation) runLocked(
+	ctx context.Context,
+	userID domain.UserID,
+	fn func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error),
+) (TransactionResult, error) {
+	var result TransactionResult
+	err := o.locker.WithPlayerLock(ctx, userID, func(ctx context.Context, uow domain.UnitOfWork) error {
+		var err error
+		result, err = fn(ctx, uow)
+		return err
+	})
+	return result, err
+}
+
 // outcomeContext is the context for the database writes made after the
 // Wallet call. The Wallet may have moved the money even if the caller has
 // gone away meanwhile, so it is not cancelled with the request; it has its

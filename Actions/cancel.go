@@ -61,13 +61,9 @@ func (handler *CancelCommandHandler) Execute(ctx context.Context, command Cancel
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	var result TransactionResult
-	err = handler.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
-		var lockedErr error
-		result, lockedErr = handler.cancelLocked(ctx, uow, player, providerID)
-		return lockedErr
+	return handler.runLocked(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error) {
+		return handler.cancelLocked(ctx, uow, player, providerID)
 	})
-	return result, err
 }
 
 func (handler *CancelCommandHandler) cancelLocked(

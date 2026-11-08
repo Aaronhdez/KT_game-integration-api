@@ -63,13 +63,9 @@ func (handler *WithdrawCommandHandler) Execute(ctx context.Context, command With
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrCurrencyMismatch)
 	}
 
-	var result TransactionResult
-	err = handler.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
-		var lockedErr error
-		result, lockedErr = handler.withdrawLocked(ctx, uow, player, providerTransactionID, command.Amount)
-		return lockedErr
+	return handler.runLocked(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error) {
+		return handler.withdrawLocked(ctx, uow, player, providerTransactionID, command.Amount)
 	})
-	return result, err
 }
 
 func (handler *WithdrawCommandHandler) withdrawLocked(

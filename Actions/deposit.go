@@ -66,13 +66,9 @@ func (handler *DepositCommandHandler) Execute(ctx context.Context, command Depos
 		return TransactionResult{}, fmt.Errorf("deposit: %w", domain.ErrCurrencyMismatch)
 	}
 
-	var result TransactionResult
-	err = handler.locker.WithPlayerLock(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) error {
-		var lockedErr error
-		result, lockedErr = handler.depositLocked(ctx, uow, player, providerTransactionID, withdrawnID, command.Amount, currency)
-		return lockedErr
+	return handler.runLocked(ctx, player.UserID, func(ctx context.Context, uow domain.UnitOfWork) (TransactionResult, error) {
+		return handler.depositLocked(ctx, uow, player, providerTransactionID, withdrawnID, command.Amount, currency)
 	})
-	return result, err
 }
 
 func (handler *DepositCommandHandler) depositLocked(
