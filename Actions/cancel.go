@@ -201,14 +201,14 @@ func (handler *CancelCommandHandler) finish(
 	case walletAppliedBalanceUnknown:
 		derived, err := balanceAfterCompensation(pending.OldBalance, target.decision)
 		if err != nil {
-			return handler.leavePending(pending, betStatus, "balance_unknown", err), nil
+			return handler.leavePending(pending, betStatus, outcomeBalanceUnknown, err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, target, derived)
 	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, betStatus, walletErr)
 	default:
 		// Unknown outcome: it stays PENDING and the API answers 202.
-		return handler.leavePending(pending, betStatus, "pending", walletErr), nil
+		return handler.leavePending(pending, betStatus, outcomePending, walletErr), nil
 	}
 }
 
@@ -303,7 +303,7 @@ func (handler *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uo
 		return TransactionResult{}, fmt.Errorf("cancel: store: %w", err)
 	}
 
-	handler.log(slog.LevelInfo, state.cancel, "completed_without_wallet", nil)
+	handler.log(slog.LevelInfo, state.cancel, outcomeCompletedWithoutWallet, nil)
 	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 
@@ -346,10 +346,10 @@ func (handler *CancelCommandHandler) complete(ctx context.Context, uow domain.Un
 		return repos.Bets.Update(ctx, state.bet)
 	})
 	if err != nil {
-		return handler.leavePending(pending, &target.bet.Status, "outcome_not_stored", err), nil
+		return handler.leavePending(pending, &target.bet.Status, outcomeNotStored, err), nil
 	}
 
-	handler.log(slog.LevelInfo, state.cancel, "completed", nil)
+	handler.log(slog.LevelInfo, state.cancel, outcomeCompleted, nil)
 	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 

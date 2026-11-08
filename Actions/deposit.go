@@ -195,14 +195,14 @@ func (handler *DepositCommandHandler) finish(
 		// under the player's lock just before it.
 		derived, err := pending.OldBalance.Add(pending.Amount)
 		if err != nil {
-			return handler.leavePending(pending, &bet.Status, "balance_unknown", err), nil
+			return handler.leavePending(pending, &bet.Status, outcomeBalanceUnknown, err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, bet, derived)
 	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, &bet.Status, walletErr)
 	default:
 		// Unknown outcome: it stays PENDING and the API answers 202.
-		return handler.leavePending(pending, &bet.Status, "pending", walletErr), nil
+		return handler.leavePending(pending, &bet.Status, outcomePending, walletErr), nil
 	}
 }
 
@@ -227,7 +227,7 @@ func (handler *DepositCommandHandler) settleWithoutWallet(ctx context.Context, u
 		return TransactionResult{}, insertDepositError("store", err)
 	}
 
-	handler.log(slog.LevelInfo, completed, "completed_without_wallet", nil)
+	handler.log(slog.LevelInfo, completed, outcomeCompletedWithoutWallet, nil)
 	return TransactionResult{Transaction: completed, BetStatus: &settled.Status}, nil
 }
 
@@ -358,10 +358,10 @@ func (handler *DepositCommandHandler) complete(ctx context.Context, uow domain.U
 		return repos.Transactions.Update(ctx, completed)
 	})
 	if err != nil {
-		return handler.leavePending(pending, &bet.Status, "outcome_not_stored", err), nil
+		return handler.leavePending(pending, &bet.Status, outcomeNotStored, err), nil
 	}
 
-	handler.log(slog.LevelInfo, completed, "completed", nil)
+	handler.log(slog.LevelInfo, completed, outcomeCompleted, nil)
 	return TransactionResult{Transaction: completed, BetStatus: &settled.Status}, nil
 }
 

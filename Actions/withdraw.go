@@ -172,14 +172,14 @@ func (handler *WithdrawCommandHandler) finish(
 		// under the player's lock just before it.
 		derived, err := pending.OldBalance.Sub(pending.Amount)
 		if err != nil {
-			return handler.leavePending(pending, nil, "balance_unknown", err), nil
+			return handler.leavePending(pending, nil, outcomeBalanceUnknown, err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, derived)
 	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, nil, walletErr)
 	default:
 		// Unknown outcome (§9.3): it stays PENDING and the API answers 202.
-		return handler.leavePending(pending, nil, "pending", walletErr), nil
+		return handler.leavePending(pending, nil, outcomePending, walletErr), nil
 	}
 }
 
@@ -201,10 +201,10 @@ func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.
 		return repos.Transactions.Update(ctx, completed)
 	})
 	if err != nil {
-		return handler.leavePending(pending, nil, "outcome_not_stored", err), nil
+		return handler.leavePending(pending, nil, outcomeNotStored, err), nil
 	}
 
-	handler.log(slog.LevelInfo, completed, "completed", nil)
+	handler.log(slog.LevelInfo, completed, outcomeCompleted, nil)
 	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
 }
 

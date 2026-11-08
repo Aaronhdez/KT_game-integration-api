@@ -66,9 +66,9 @@ func (o operation) outcomeContext(ctx context.Context) (context.Context, context
 // 502. Nothing else changes. betStatus is what leavePending reports if the
 // write fails.
 func (o operation) fail(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, betStatus *domain.BetStatus, walletErr error) (TransactionResult, error) {
-	reason, outcome, level := domain.FailureWalletRejected, "rejected", slog.LevelError
+	reason, outcome, level := domain.FailureWalletRejected, outcomeRejected, slog.LevelError
 	if errors.Is(walletErr, domain.ErrInsufficientFunds) {
-		reason, outcome, level = domain.FailureInsufficientFunds, "insufficient_funds", slog.LevelWarn
+		reason, outcome, level = domain.FailureInsufficientFunds, outcomeInsufficientFunds, slog.LevelWarn
 	}
 
 	failed := pending
@@ -80,7 +80,7 @@ func (o operation) fail(ctx context.Context, uow domain.UnitOfWork, pending doma
 		return repos.Transactions.Update(ctx, failed)
 	})
 	if err != nil {
-		return o.leavePending(pending, betStatus, "outcome_not_stored", err), nil
+		return o.leavePending(pending, betStatus, outcomeNotStored, err), nil
 	}
 
 	o.log(level, failed, outcome, walletErr)
@@ -90,13 +90,13 @@ func (o operation) fail(ctx context.Context, uow domain.UnitOfWork, pending doma
 // leavePending returns the transaction as it is stored: PENDING, with the
 // bet's status unchanged. betStatus is nil for a withdraw, whose bet does not
 // exist until it completes. A transaction still unknown after
-// overdueAfter is logged as "pending_overdue", at error level.
-func (o operation) leavePending(pending domain.Transaction, betStatus *domain.BetStatus, outcome string, cause error) TransactionResult {
-	if outcome == "pending" && o.clock.Now().Sub(pending.CreatedAt) >= overdueAfter {
-		outcome = "pending_overdue"
+// overdueAfter is logged as outcomePendingOverdue, at error level.
+func (o operation) leavePending(pending domain.Transaction, betStatus *domain.BetStatus, outcome logOutcome, cause error) TransactionResult {
+	if outcome == outcomePending && o.clock.Now().Sub(pending.CreatedAt) >= overdueAfter {
+		outcome = outcomePendingOverdue
 	}
 	level := slog.LevelWarn
-	if outcome == "outcome_not_stored" || outcome == "pending_overdue" {
+	if outcome == outcomeNotStored || outcome == outcomePendingOverdue {
 		level = slog.LevelError
 	}
 	o.log(level, pending, outcome, cause)
@@ -156,14 +156,14 @@ func asReplay(result TransactionResult, err error) (TransactionResult, error) {
 
 // log writes the one line per operation: only identifiers, the amount and
 // the outcome.
-func (o operation) log(level slog.Level, tx domain.Transaction, outcome string, cause error) {
+func (o operation) log(level slog.Level, tx domain.Transaction, outcome logOutcome, cause error) {
 	attributes := []any{
 		"transaction_id", tx.ID,
 		"provider_transaction_id", tx.ProviderTransactionID,
 		"user_id", tx.UserID,
 		"bet_id", tx.BetID,
 		"amount", tx.Amount.String(),
-		"outcome", outcome,
+		"outcome", outcome.String(),
 	}
 	if tx.CancelledTransactionID != "" {
 		attributes = append(attributes, "cancelled_transaction_id", tx.CancelledTransactionID)
