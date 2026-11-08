@@ -49,7 +49,7 @@ func (handler *WithdrawCommandHandler) Execute(ctx context.Context, command With
 		return TransactionResult{}, fmt.Errorf("withdraw: %w", err)
 	}
 	if !command.Amount.IsPositive() {
-		return TransactionResult{}, fmt.Errorf("withdraw: must be greater than zero %w", domain.ErrInvalidAmount)
+		return TransactionResult{}, fmt.Errorf("withdraw: %w: must be greater than zero", domain.ErrInvalidAmount)
 	}
 	currency, err := domain.ParseCurrency(command.Currency)
 	if err != nil {
