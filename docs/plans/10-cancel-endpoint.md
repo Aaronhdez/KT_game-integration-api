@@ -306,7 +306,20 @@ has its original `CANCELLED` and the right bet status; 7 cancel log lines (4
 `completed`, 2 `completed_without_wallet`, 1 `insufficient_funds`); no secret
 in the logs. The Wallet left 2 of the ~14 withdraws `PENDING` (`202`), which
 blocked the scenarios built on them (`409` "withdraw is not completed", as
-expected); they were re-run. Phase 09's own manual check is still pending.
+expected); they were re-run.
+
+The developer then repeated the main cases with `curl` (cancel of a withdraw
+and its replay, the settled-bet `409`, cancel of a deposit and a new deposit
+on the bet, `404`/`400`/`401`). Two Wallet `500 "666"` answers produced the
+unknown-outcome path for real: a cancel stayed `PENDING` (its retry answered
+`202` without a new Wallet call, and a deposit on that bet got `409` "cancel
+in progress"), and a deposit stayed `PENDING` with its bet `PLACED`. No
+secret in the logs.
+
+These runs also exercised Phase 09's deposit cases (`201` `WON`/`LOST`,
+settled bet `409`, withdraw not completed `409`); its validation cases
+(`EUR`, missing `amount`) were not run, so Phase 09's own manual check stays
+pending.
 
 ## Definition of done
 
