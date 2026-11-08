@@ -123,7 +123,19 @@ func (handler *CancelCommandHandler) cancelLocked(
 		BetID:     target.bet.ID,
 		Reference: pending.ID,
 	})
+	return handler.finish(ctx, uow, pending, target, newBalance, walletErr)
+}
 
+// finish stores what the Wallet's answer means for the pending cancel, the
+// original and its bet and returns the result.
+func (handler *CancelCommandHandler) finish(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	pending domain.Transaction,
+	target cancelTarget,
+	newBalance domain.Money,
+	walletErr error,
+) (TransactionResult, error) {
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 

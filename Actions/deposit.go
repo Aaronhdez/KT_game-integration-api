@@ -137,7 +137,19 @@ func (handler *DepositCommandHandler) depositLocked(
 		BetID:     bet.ID,
 		Reference: pending.ID,
 	})
+	return handler.finish(ctx, uow, pending, bet, newBalance, walletErr)
+}
 
+// finish stores what the Wallet's answer means for the pending deposit and
+// its bet and returns the result.
+func (handler *DepositCommandHandler) finish(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	pending domain.Transaction,
+	bet domain.Bet,
+	newBalance domain.Money,
+	walletErr error,
+) (TransactionResult, error) {
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
@@ -146,8 +158,9 @@ func (handler *DepositCommandHandler) depositLocked(
 	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, bet, newBalance)
 	case walletAppliedBalanceUnknown:
-		// Exact: the old balance was read under the player's lock just before.
-		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Add(amount.Decimal()))
+		// The balance right after the first attempt: its old balance was read
+		// under the player's lock just before it.
+		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Add(pending.Amount.Decimal()))
 		if err != nil {
 			return handler.leavePending(pending, &bet.Status, "balance_unknown", err), nil
 		}

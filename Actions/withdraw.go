@@ -128,7 +128,18 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 		BetID:     pending.BetID,
 		Reference: pending.ID,
 	})
+	return handler.finish(ctx, uow, pending, newBalance, walletErr)
+}
 
+// finish stores what the Wallet's answer means for the pending withdraw
+// and returns the result.
+func (handler *WithdrawCommandHandler) finish(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	pending domain.Transaction,
+	newBalance domain.Money,
+	walletErr error,
+) (TransactionResult, error) {
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
@@ -136,8 +147,9 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, newBalance)
 	case walletAppliedBalanceUnknown:
-		// Exact: the old balance was read under the player's lock just before.
-		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(amount.Decimal()))
+		// The balance right after the first attempt: its old balance was read
+		// under the player's lock just before it.
+		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(pending.Amount.Decimal()))
 		if err != nil {
 			return handler.leavePending(pending, nil, "balance_unknown", err), nil
 		}
