@@ -77,11 +77,7 @@ func (handler *CancelCommandHandler) Execute(ctx context.Context, command Cancel
 func (handler *CancelCommandHandler) cancelLocked(ctx context.Context, uow domain.UnitOfWork, request cancelRequest) (TransactionResult, error) {
 	// First: while a cancel is PENDING or FAILED its original is still
 	// COMPLETED, so DecideCancel alone would accept a second cancel.
-	if result, found, err := handler.replayIfCancelled(ctx, uow, request); found || err != nil {
-		if err == nil && result.Transaction.Status == domain.TransactionPending {
-			// A retry of a PENDING cancel re-sends it, if it is due.
-			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
-		}
+	if result, handled, err := handler.replayOrResend(ctx, uow, request); handled {
 		return result, err
 	}
 
@@ -209,6 +205,25 @@ func (handler *CancelCommandHandler) finish(
 		// Unknown outcome: it stays PENDING and the API answers 202.
 		return handler.leavePending(pending, betStatus, outcomePending, walletErr), nil
 	}
+}
+
+// replayOrResend answers a cancel of a transaction that already has one.
+// handled is false when it has none, and the caller goes on with a new cancel.
+// Otherwise the result is the stored one (replayIfCancelled), except for a
+// PENDING cancel, which is re-sent to the Wallet if it is due.
+func (handler *CancelCommandHandler) replayOrResend(ctx context.Context, uow domain.UnitOfWork, request cancelRequest) (result TransactionResult, handled bool, err error) {
+	result, found, err := handler.replayIfCancelled(ctx, uow, request)
+	if err != nil {
+		return TransactionResult{}, true, err
+	}
+	if !found {
+		return TransactionResult{}, false, nil
+	}
+	if result.Transaction.Status != domain.TransactionPending {
+		return result, true, nil
+	}
+	result, err = asReplay(handler.resendPending(ctx, uow, result.Transaction))
+	return result, true, err
 }
 
 // replayIfCancelled looks for the cancel of the transaction identified by the

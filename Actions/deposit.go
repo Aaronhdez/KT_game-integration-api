@@ -83,11 +83,7 @@ func (handler *DepositCommandHandler) Execute(ctx context.Context, command Depos
 }
 
 func (handler *DepositCommandHandler) depositLocked(ctx context.Context, uow domain.UnitOfWork, request depositRequest) (TransactionResult, error) {
-	if result, found, err := handler.replayIfProcessed(ctx, uow, request); found || err != nil {
-		if err == nil && result.Transaction.Status == domain.TransactionPending {
-			// A retry of a PENDING deposit re-sends it, if it is due.
-			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
-		}
+	if result, handled, err := handler.replayOrResend(ctx, uow, request); handled {
 		return result, err
 	}
 
@@ -252,6 +248,25 @@ func (handler *DepositCommandHandler) replayAfterDuplicateInsert(ctx context.Con
 		return TransactionResult{}, fmt.Errorf("deposit: %w", domain.ErrTransactionExists)
 	}
 	return TransactionResult{}, insertDepositError("store", insertErr)
+}
+
+// replayOrResend answers a request whose provider ID was already used.
+// handled is false when it is new, and the caller goes on with a new deposit.
+// Otherwise the result is the stored one (replayIfProcessed), except for a
+// PENDING deposit, which is re-sent to the Wallet if it is due.
+func (handler *DepositCommandHandler) replayOrResend(ctx context.Context, uow domain.UnitOfWork, request depositRequest) (result TransactionResult, handled bool, err error) {
+	result, found, err := handler.replayIfProcessed(ctx, uow, request)
+	if err != nil {
+		return TransactionResult{}, true, err
+	}
+	if !found {
+		return TransactionResult{}, false, nil
+	}
+	if result.Transaction.Status != domain.TransactionPending {
+		return result, true, nil
+	}
+	result, err = asReplay(handler.resendPending(ctx, uow, result.Transaction))
+	return result, true, err
 }
 
 // replayIfProcessed looks for a deposit already stored for the request's

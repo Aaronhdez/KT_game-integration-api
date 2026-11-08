@@ -79,11 +79,7 @@ func (handler *WithdrawCommandHandler) Execute(ctx context.Context, command With
 }
 
 func (handler *WithdrawCommandHandler) withdrawLocked(ctx context.Context, uow domain.UnitOfWork, request withdrawRequest) (TransactionResult, error) {
-	if result, found, err := handler.replayIfProcessed(ctx, uow, request); found || err != nil {
-		if err == nil && result.Transaction.Status == domain.TransactionPending {
-			// A retry of a PENDING withdraw re-sends it, if it is due.
-			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
-		}
+	if result, handled, err := handler.replayOrResend(ctx, uow, request); handled {
 		return result, err
 	}
 
@@ -206,6 +202,25 @@ func (handler *WithdrawCommandHandler) complete(ctx context.Context, uow domain.
 
 	handler.log(slog.LevelInfo, completed, outcomeCompleted, nil)
 	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
+}
+
+// replayOrResend answers a request whose provider ID was already used.
+// handled is false when it is new, and the caller goes on with a new withdraw.
+// Otherwise the result is the stored one (replayIfProcessed), except for a
+// PENDING withdraw, which is re-sent to the Wallet if it is due.
+func (handler *WithdrawCommandHandler) replayOrResend(ctx context.Context, uow domain.UnitOfWork, request withdrawRequest) (result TransactionResult, handled bool, err error) {
+	result, found, err := handler.replayIfProcessed(ctx, uow, request)
+	if err != nil {
+		return TransactionResult{}, true, err
+	}
+	if !found {
+		return TransactionResult{}, false, nil
+	}
+	if result.Transaction.Status != domain.TransactionPending {
+		return result, true, nil
+	}
+	result, err = asReplay(handler.resendPending(ctx, uow, result.Transaction))
+	return result, true, err
 }
 
 // replayIfProcessed looks for a transaction already stored for the request's
