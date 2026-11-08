@@ -80,6 +80,12 @@ func (h *CancelCommandHandler) cancelLocked(
 	player domain.Player,
 	providerID domain.ProviderTransactionID,
 ) (TransactionResult, error) {
+	// First: while a cancel is PENDING or FAILED its original is still
+	// COMPLETED, so DecideCancel alone would accept a second cancel.
+	if result, found, err := h.replayIfCancelled(ctx, uow, player.UserID, providerID); found || err != nil {
+		return result, err
+	}
+
 	// Under the lock: no other operation of the player can settle, cancel or
 	// change the bet between this decision and the cancel being stored.
 	target, err := h.findWhatToRevert(ctx, uow, player.UserID, providerID)
@@ -95,12 +101,19 @@ func (h *CancelCommandHandler) cancelLocked(
 	pending := domain.NewCancel(h.ids.NewTransactionID(), target.original, oldBalance, h.clock.Now())
 
 	if target.decision.Action == domain.CancelNoWalletCall {
-		return h.cancelWithoutWallet(ctx, uow, pending, target)
+		result, err := h.cancelWithoutWallet(ctx, uow, pending, target)
+		if errors.Is(err, domain.ErrAlreadyCancelled) {
+			return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
+		}
+		return result, err
 	}
 
 	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
 		return repos.Transactions.Insert(ctx, pending)
 	})
+	if errors.Is(err, domain.ErrAlreadyCancelled) {
+		return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID)
+	}
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: store pending: %w", err)
 	}
@@ -133,6 +146,74 @@ func (h *CancelCommandHandler) cancelLocked(
 		// Unknown outcome: it stays PENDING and the API answers 202.
 		return h.leavePending(pending, target.bet, "pending", walletErr), nil
 	}
+}
+
+// replayIfCancelled looks for the cancel of the transaction identified by
+// providerID. found is false when the transaction or its cancel does not exist;
+// findWhatToRevertthen reports an unknown transaction. When there is a cancel,
+// its stored result is returned without any Wallet call:
+//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - otherwise (PENDING, COMPLETED) → its current state and its bet's
+//     (202 or 200).
+//
+// The request carries nothing but the key, so a cancel can never be a
+// "different payload" conflict.
+func (h *CancelCommandHandler) replayIfCancelled(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	userID domain.UserID,
+	providerID domain.ProviderTransactionID,
+) (TransactionResult, bool, error) {
+	var result TransactionResult
+	found := false
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		original, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, providerID)
+		if errors.Is(err, domain.ErrTransactionNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		previous, err := repos.Transactions.FindCancelOf(ctx, userID, original.ID)
+		if errors.Is(err, domain.ErrTransactionNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+
+		if previous.Status == domain.TransactionFailed {
+			return domain.ErrPreviousAttemptFailed
+		}
+		bet, err := repos.Bets.FindByID(ctx, userID, original.BetID)
+		if err != nil {
+			return err
+		}
+		result = TransactionResult{Transaction: previous, BetStatus: &bet.Status, Replayed: true}
+		return nil
+	})
+	if err != nil {
+		return TransactionResult{}, true, fmt.Errorf("cancel: %w", err)
+	}
+	return result, found, nil
+}
+
+// replayAfterDuplicateInsert handles a cancel rejected by the single-cancel
+// unique index although our lookup found none: the same cancel was stored
+// meanwhile (only possible if the lock failed, e.g. two API instances), so it
+// is a replay.
+func (h *CancelCommandHandler) replayAfterDuplicateInsert(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	userID domain.UserID,
+	providerID domain.ProviderTransactionID,
+) (TransactionResult, error) {
+	result, found, err := h.replayIfCancelled(ctx, uow, userID, providerID)
+	if found || err != nil {
+		return result, err
+	}
+	return TransactionResult{}, fmt.Errorf("cancel: %w: the transaction already has a cancel", domain.ErrConflict)
 }
 
 // cancelWithoutWallet cancels a zero-amount deposit: no money moves, so there
@@ -309,6 +390,13 @@ func (h *CancelCommandHandler) findWhatToRevert(
 		}
 
 		decision, err := domain.DecideCancel(original, bet)
+		if errors.Is(err, domain.ErrAlreadyCancelled) {
+			// replayIfCancelled found no cancel for this CANCELLED original:
+			// the data is inconsistent, so there is no earlier result to return.
+			h.logger.Error("cancelled transaction without its cancel",
+				"transaction_id", original.ID, "provider_transaction_id", original.ProviderTransactionID)
+			return fmt.Errorf("%w: the transaction is already cancelled", domain.ErrConflict)
+		}
 		if err != nil {
 			return err
 		}

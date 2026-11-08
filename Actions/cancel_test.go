@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -565,6 +566,151 @@ func TestCancel_BalanceReadFails_DoesNotRevertNorStoreAnything(t *testing.T) {
 	}
 }
 
+// Idempotency: a replay never reaches the Wallet
+
+func TestCancel_SameCancelTwice_SecondIsAReplayOfTheCompletedCancel(t *testing.T) {
+	fixture := givenACancel(t)
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertReplayOf(t, result, err, theCompletedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, "5000.00"), betStatus(domain.BetCancelled))
+}
+
+func TestCancel_SameCancelTwice_SendsTheCompensationOnlyOnce(t *testing.T) {
+	fixture := givenACancel(t)
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, testWithdrawnStake))
+}
+
+func TestCancel_SameCancelTwice_StoresOneCancel(t *testing.T) {
+	fixture := givenACancel(t)
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{
+			theCompletedCancelOf(t, theWithdraw(t, domain.TransactionCompleted), testBalanceAfterBet, "5000.00"),
+			theWithdraw(t, domain.TransactionCancelled),
+		},
+		bets: []domain.Bet{theBet(t, domain.BetCancelled)},
+	})
+}
+
+func TestCancel_ZeroDepositCancelTwice_SecondIsAReplayWithoutWalletCalls(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+// Resolving a PENDING cancel (re-sending it to the Wallet) is Phase 11.
+func TestCancel_ReplayOfAPendingCancel_ReturnsItPendingWithTheBetUnchanged(t *testing.T) {
+	stored := theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionPending))
+	fixture := givenACancelWithStore(t, stored)
+
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertReplayOf(t, result, err, aCancelOfTheWithdraw(t, domain.TransactionPending), betStatus(domain.BetPlaced))
+}
+
+func TestCancel_ReplayOfAPendingCancel_DoesNotCallTheWallet(t *testing.T) {
+	stored := theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionPending))
+	fixture := givenACancelWithStore(t, stored)
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertNoCancelWalletCallsAndStoreHolds(t, fixture, stored)
+}
+
+// Final FAILED-retry policy: Phase 11.
+func TestCancel_ReplayOfAFailedCancel_IsPreviousAttemptFailed(t *testing.T) {
+	fixture := givenACancelWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed)))
+
+	_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+}
+
+func TestCancel_ReplayOfAFailedCancel_DoesNotCallTheWalletNorStoreAnything(t *testing.T) {
+	stored := theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed))
+	fixture := givenACancelWithStore(t, stored)
+
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertNoCancelWalletCallsAndStoreHolds(t, fixture, stored)
+}
+
+// A replay "reflects the transaction's current state": after the
+// deposit was cancelled, a new deposit settled the bet again.
+func TestCancel_ReplayAfterTheBetWasSettledAgain_ReturnsTheCancelWithTheCurrentBetStatus(t *testing.T) {
+	fixture := givenACancelOfTheDeposit(t)
+	fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+	fixture.aDepositHandler().Execute(context.Background(), aDepositCommandWith(t, "prov-tx-0004", testProviderID, "40.00", "USD"))
+
+	result, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertReplayOf(t, result, err, theCompletedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "25.00"), testBalanceAfterWin, testBalanceAfterBet), betStatus(domain.BetWon))
+}
+
+// A cancelled original always has its completed cancel; if it were missing,
+// the request cannot be answered as a replay.
+func TestCancel_CancelledTransactionWithoutItsCancel_IsConflict(t *testing.T) {
+	fixture := givenACancelWithStore(t, storeContents{
+		transactions: []domain.Transaction{theWithdraw(t, domain.TransactionCancelled)},
+		bets:         []domain.Bet{theBet(t, domain.BetCancelled)},
+	})
+
+	_, err := fixture.cancel.Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertErrorIs(t, err, domain.ErrConflict)
+}
+
+// The safety net: an identical cancel stored by someone else between our
+// lookup and our insert (only possible if the lock failed, e.g. two API
+// instances) is still a replay, thanks to the single-cancel unique index.
+func TestCancel_IdenticalCancelStoredMeanwhile_IsAReplayWithoutTheCompensation(t *testing.T) {
+	fixture := givenACancel(t)
+	wallet := &racingWallet{FakeWallet: fixture.wallet, store: fixture.store, stored: aCancelOfTheWithdraw(t, domain.TransactionPending)}
+
+	result, err := fixture.cancelWith(wallet).Execute(context.Background(), aCancelCommand(testProviderID))
+
+	assertReplayOf(t, result, err, aCancelOfTheWithdraw(t, domain.TransactionPending), betStatus(domain.BetPlaced))
+}
+
+func TestCancel_IdenticalZeroDepositCancelStoredMeanwhile_IsAReplay(t *testing.T) {
+	fixture := givenACancelOfTheZeroDeposit(t)
+	stored := aCompletedCancelOfTheZeroDepositByAnotherInstance(t)
+	wallet := &racingWallet{FakeWallet: fixture.wallet, store: fixture.store, stored: stored}
+
+	result, err := fixture.cancelWith(wallet).Execute(context.Background(), aCancelCommand(testDepositProviderID))
+
+	assertReplayOf(t, result, err, stored, betStatus(domain.BetLost))
+}
+
+// §9.2: "including when two identical requests arrive at the same time".
+func TestCancel_ConcurrentIdenticalCancels_SendTheCompensationOnce(t *testing.T) {
+	fixture := givenACancel(t)
+
+	executeCancelsConcurrently(t, fixture.cancel, identicalCancelCommands(10))
+
+	assertDepositCalls(t, fixture.wallet, 1)
+}
+
+func TestCancel_ConcurrentIdenticalCancels_OneIsProcessedAndTheOthersAreReplays(t *testing.T) {
+	fixture := givenACancel(t)
+
+	result, errs := executeCancelsConcurrently(t, fixture.cancel, identicalCancelCommands(10))
+
+	assertProcessedAndReplayedWithoutErrors(t, result, errs, 1, 9)
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // cancelFixture keeps the fakes reachable, so a test can script or break one
@@ -689,6 +835,42 @@ func theFailedCancelOf(t *testing.T, original domain.Transaction, oldBalance str
 	tx := thePendingCancelOf(t, original, oldBalance)
 	tx.Status = domain.TransactionFailed
 	return tx
+}
+
+// aCompletedCancelOfTheZeroDepositByAnotherInstance is the same zero-deposit
+// cancel, already stored by another API instance with its own ID. Only the
+// cancel row is put in the store, so the bet still reads LOST.
+func aCompletedCancelOfTheZeroDepositByAnotherInstance(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := theCompletedCancelOf(t, theSettlingDeposit(t, domain.TransactionCompleted, "0.00"), testBalanceAfterBet, testBalanceAfterBet)
+	tx.ID = domaintest.FakeTransactionID(50)
+	return tx
+}
+
+func identicalCancelCommands(count int) []CancelCommand {
+	commands := make([]CancelCommand, count)
+	for i := range commands {
+		commands[i] = aCancelCommand(testProviderID)
+	}
+	return commands
+}
+
+// executeCancelsConcurrently runs every command from its own goroutine at
+// once and returns every result and error, in the order of commands.
+func executeCancelsConcurrently(t *testing.T, cancel *CancelCommandHandler, commands []CancelCommand) ([]TransactionResult, []error) {
+	t.Helper()
+	results := make([]TransactionResult, len(commands))
+	errs := make([]error, len(commands))
+	var wg sync.WaitGroup
+	for i, command := range commands {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = cancel.Execute(context.Background(), command)
+		}()
+	}
+	wg.Wait()
+	return results, errs
 }
 
 // debitBackCall is the Wallet withdraw that takes a deposit back.
