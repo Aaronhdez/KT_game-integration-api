@@ -88,6 +88,10 @@ func (h *DepositCommandHandler) depositLocked(
 	amount domain.Money,
 	currency domain.Currency,
 ) (TransactionResult, error) {
+	if result, found, err := h.replayIfProcessed(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency); found || err != nil {
+		return result, err
+	}
+
 	// Under the lock: no other operation of the player can settle or cancel
 	// the bet between this check and the deposit being stored.
 	bet, err := h.findBetToSettle(ctx, uow, player.UserID, withdrawnID, amount, currency)
@@ -111,12 +115,19 @@ func (h *DepositCommandHandler) depositLocked(
 	}, h.clock.Now())
 
 	if amount.IsZero() {
-		return h.settleWithoutWallet(ctx, uow, pending, bet)
+		result, err := h.settleWithoutWallet(ctx, uow, pending, bet)
+		if isDuplicateDeposit(err) {
+			return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency, err)
+		}
+		return result, err
 	}
 
 	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
 		return repos.Transactions.Insert(ctx, pending)
 	})
+	if isDuplicateDeposit(err) {
+		return h.replayAfterDuplicateInsert(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency, err)
+	}
 	if err != nil {
 		return TransactionResult{}, insertDepositError("store pending", err)
 	}
@@ -178,6 +189,102 @@ func (h *DepositCommandHandler) settleWithoutWallet(ctx context.Context, uow dom
 
 	h.log(slog.LevelInfo, completed, "completed_without_wallet", nil)
 	return TransactionResult{Transaction: completed, BetStatus: &settled.Status}, nil
+}
+
+// isDuplicateDeposit tells whether a unique index rejected the new deposit:
+// its provider ID is taken, or its bet already has an active deposit.
+func isDuplicateDeposit(err error) bool {
+	return errors.Is(err, domain.ErrTransactionExists) || errors.Is(err, domain.ErrBetAlreadySettled)
+}
+
+// replayAfterDuplicateInsert handles a deposit rejected by a unique index
+// although our lookup found nothing. Either the same request was stored
+// meanwhile (only possible if the lock failed, e.g. two API instances): a
+// replay; or the provider ID belongs to another player, or another
+// deposit settles the bet: the insert error stands (409). Both indexes are
+// checked because PostgreSQL does not say which one it reports first when a
+// row breaks the two.
+func (h *DepositCommandHandler) replayAfterDuplicateInsert(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	userID domain.UserID,
+	providerID domain.ProviderTransactionID,
+	withdrawnID domain.ProviderTransactionID,
+	amount domain.Money,
+	currency domain.Currency,
+	insertErr error,
+) (TransactionResult, error) {
+	if result, found, err := h.replayIfProcessed(ctx, uow, userID, providerID, withdrawnID, amount, currency); found || err != nil {
+		return result, err
+	}
+	if errors.Is(insertErr, domain.ErrTransactionExists) {
+		// Its message reaches the provider: the reason only, no internal details.
+		return TransactionResult{}, fmt.Errorf("deposit: %w", domain.ErrTransactionExists)
+	}
+	return TransactionResult{}, insertDepositError("store", insertErr)
+}
+
+// replayIfProcessed looks for a deposit already stored for providerID. found
+// is false when there is none. When there is one, the stored result is
+// returned without any Wallet call:
+//   - not a deposit, or another amount, currency or withdraw →
+//     ErrIdempotencyConflict (409);
+//   - FAILED → ErrPreviousAttemptFailed (409);
+//   - otherwise (PENDING, COMPLETED, CANCELLED) → its current state and its
+//     bet's (202 or 200).
+//
+// "Same withdraw" is checked through the bet: every withdraw has its own bet,
+// and the deposit stores the bet it settles.
+func (h *DepositCommandHandler) replayIfProcessed(
+	ctx context.Context,
+	uow domain.UnitOfWork,
+	userID domain.UserID,
+	providerID domain.ProviderTransactionID,
+	withdrawnID domain.ProviderTransactionID,
+	amount domain.Money,
+	currency domain.Currency,
+) (TransactionResult, bool, error) {
+	var result TransactionResult
+	found := false
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		previous, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, providerID)
+		if errors.Is(err, domain.ErrTransactionNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+
+		if previous.Type != domain.TransactionDeposit ||
+			!previous.Amount.Equal(amount) || previous.Currency != currency {
+			return domain.ErrIdempotencyConflict
+		}
+		withdraw, err := repos.Transactions.FindByProviderTransactionID(ctx, userID, withdrawnID)
+		if errors.Is(err, domain.ErrTransactionNotFound) {
+			return domain.ErrIdempotencyConflict
+		}
+		if err != nil {
+			return err
+		}
+		if withdraw.Type != domain.TransactionWithdraw || withdraw.BetID != previous.BetID {
+			return domain.ErrIdempotencyConflict
+		}
+
+		if previous.Status == domain.TransactionFailed {
+			return domain.ErrPreviousAttemptFailed
+		}
+		bet, err := repos.Bets.FindByID(ctx, userID, previous.BetID)
+		if err != nil {
+			return err
+		}
+		result = TransactionResult{Transaction: previous, BetStatus: &bet.Status, Replayed: true}
+		return nil
+	})
+	if err != nil {
+		return TransactionResult{}, true, fmt.Errorf("deposit: %w", err)
+	}
+	return result, found, nil
 }
 
 // insertDepositError describes a failed insert of a new deposit. The bet is

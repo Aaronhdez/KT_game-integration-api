@@ -3,8 +3,11 @@ package actions
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -351,6 +354,218 @@ func TestDeposit_ZeroAmountAndStoreFails_LeavesTheBetPlaced(t *testing.T) {
 	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
 
 	assertStoreHolds(t, fixture.store, theArrangedStore(t))
+}
+
+// Idempotency (§7.1, §7.2, §9.2): a replay never reaches the Wallet
+
+func TestDeposit_SameRequestTwice_SecondIsAReplayOfTheCompletedDeposit(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, aCompletedDeposit(t, "25.00", "5014.50"), betStatus(domain.BetWon))
+}
+
+func TestDeposit_SameRequestTwice_CallsTheWalletOnlyForTheFirst(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, "25.00"))
+}
+
+func TestDeposit_SameRequestTwice_StoresOneDeposit(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{aCompletedDeposit(t, "25.00", "5014.50"), theWithdraw(t, domain.TransactionCompleted)},
+		bets:         []domain.Bet{theBet(t, domain.BetWon)},
+	})
+}
+
+func TestDeposit_ZeroAmountTwice_SecondIsAReplayWithoutWalletCalls(t *testing.T) {
+	fixture := givenADeposit(t)
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "0.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
+func TestDeposit_ReplayOfAPendingDeposit_ReturnsItPendingWithBetStatusPlaced(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aPendingDeposit(t, "25.00")))
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, aPendingDeposit(t, "25.00"), betStatus(domain.BetPlaced))
+}
+
+// Resolving a PENDING deposit (re-sending it to the Wallet) is Phase 11.
+func TestDeposit_ReplayOfAPendingDeposit_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aPendingDeposit(t, "25.00")))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
+func TestDeposit_ReplayOfAFailedDeposit_IsPreviousAttemptFailed(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrPreviousAttemptFailed)
+}
+
+func TestDeposit_ReplayOfAFailedDeposit_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aFailedDeposit(t, "25.00")))
+
+	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
+// §7.2: a replay "reflects the transaction's current state", even after the
+// deposit was cancelled and the bet returned to PLACED (§8.5).
+func TestDeposit_ReplayOfACancelledDeposit_ReturnsItsCurrentState(t *testing.T) {
+	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aCancelledDeposit(t, "25.00")))
+
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, aCancelledDeposit(t, "25.00"), betStatus(domain.BetPlaced))
+}
+
+type depositConflictCase struct {
+	name    string
+	stored  storeContents
+	command DepositCommand
+}
+
+// depositConflicts: the provider ID is already used by a request that is not
+// this one.
+func depositConflicts(t *testing.T) []depositConflictCase {
+	t.Helper()
+	completed := theArrangedStoreWith(t, aCompletedDeposit(t, "25.00", "5014.50"))
+	return []depositConflictCase{
+		{"another amount", completed, aDepositCommand(t, "26.00")},
+		{"another currency", theArrangedStoreWith(t, aDepositInCurrency(t, domain.EUR)), aDepositCommand(t, "25.00")},
+		{"another withdraw", withAnotherWithdraw(t, completed),
+			aDepositCommandWith(t, testDepositProviderID, anotherWithdrawProviderID, "25.00", "USD")},
+		{"an unknown withdraw", completed,
+			aDepositCommandWith(t, testDepositProviderID, unknownProviderID, "25.00", "USD")},
+		{"the provider id of a withdraw", theArrangedStore(t),
+			aDepositCommandWith(t, testProviderID, testProviderID, "10.50", "USD")},
+	}
+}
+
+func TestDeposit_SameProviderIDWithAnotherPayload_IsIdempotencyConflict(t *testing.T) {
+	for _, testCase := range depositConflicts(t) {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADepositWithStore(t, testCase.stored)
+
+			_, err := fixture.deposit.Execute(context.Background(), testCase.command)
+
+			assertErrorIs(t, err, domain.ErrIdempotencyConflict)
+		})
+	}
+}
+
+func TestDeposit_SameProviderIDWithAnotherPayload_DoesNotCallTheWalletNorStoreAnything(t *testing.T) {
+	for _, testCase := range depositConflicts(t) {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADepositWithStore(t, testCase.stored)
+
+			fixture.deposit.Execute(context.Background(), testCase.command)
+
+			assertNoWalletCallsAndStoreHolds(t, fixture, testCase.stored)
+		})
+	}
+}
+
+// §6.1: provider transaction IDs are unique across the whole system. The
+// other player's transaction is never returned, only "the ID is taken".
+
+var depositAmounts = []struct {
+	name   string
+	amount string
+}{
+	{"positive amount", "25.00"},
+	{"zero amount", "0.00"},
+}
+
+func TestDeposit_ProviderIDOfAnotherPlayer_IsTransactionExists(t *testing.T) {
+	for _, testCase := range depositAmounts {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anotherPlayersDeposit(t)))
+
+			_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, testCase.amount))
+
+			assertErrorIs(t, err, domain.ErrTransactionExists)
+		})
+	}
+}
+
+func TestDeposit_ProviderIDOfAnotherPlayer_DoesNotCallTheWalletDepositNorStoreAnything(t *testing.T) {
+	for _, testCase := range depositAmounts {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := givenADepositWithStore(t, theArrangedStoreWith(t, anotherPlayersDeposit(t)))
+
+			fixture.deposit.Execute(context.Background(), aDepositCommand(t, testCase.amount))
+
+			assertOnlyTheBalanceWasReadAndStoreHolds(t, fixture, theArrangedStoreWith(t, anotherPlayersDeposit(t)))
+		})
+	}
+}
+
+// The safety net: an identical request stored by someone else between our
+// lookup and our insert (only possible if the lock failed, e.g. two API
+// instances) is still a replay, thanks to the unique indexes.
+func TestDeposit_IdenticalRequestStoredMeanwhile_IsAReplayWithoutDepositing(t *testing.T) {
+	fixture := givenADeposit(t)
+	wallet := &racingWallet{FakeWallet: fixture.wallet, store: fixture.store, stored: aDepositStoredByAnotherInstance(t)}
+
+	result, err := fixture.depositWith(wallet).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, aDepositStoredByAnotherInstance(t), betStatus(domain.BetPlaced))
+}
+
+// §9.2: "including when two identical requests arrive at the same time".
+func TestDeposit_ConcurrentIdenticalRequests_CallTheWalletDepositOnce(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	executeDepositsConcurrently(t, fixture.deposit, identicalDepositCommands(t, 10))
+
+	assertDepositCalls(t, fixture.wallet, 1)
+}
+
+func TestDeposit_ConcurrentIdenticalRequests_OneIsProcessedAndTheOthersAreReplays(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	result, errs := executeDepositsConcurrently(t, fixture.deposit, identicalDepositCommands(t, 10))
+
+	assertProcessedAndReplayedWithoutErrors(t, result, errs, 1, 9)
+}
+
+// One active settlement per bet (§8.4), also for simultaneous requests.
+func TestDeposit_ConcurrentDepositsOnOneBet_CallTheWalletDepositOnce(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	executeDepositsConcurrently(t, fixture.deposit, competingDepositCommands(t, 10))
+
+	assertDepositCalls(t, fixture.wallet, 1)
+}
+
+func TestDeposit_ConcurrentDepositsOnOneBet_OneCompletesAndTheOthersAreBetAlreadySettled(t *testing.T) {
+	fixture := givenADeposit(t)
+
+	_, errs := executeDepositsConcurrently(t, fixture.deposit, competingDepositCommands(t, 10))
+
+	assertOneSucceededAndTheOthersFailedWith(t, errs, domain.ErrBetAlreadySettled)
 }
 
 // Validation: before the lock and any Wallet call
@@ -716,6 +931,99 @@ func anEarlierDeposit(t *testing.T, status domain.TransactionStatus) domain.Tran
 	return tx
 }
 
+func aCancelledDeposit(t *testing.T, amount string) domain.Transaction {
+	t.Helper()
+	tx := aCompletedDeposit(t, amount, "5014.50")
+	tx.Status = domain.TransactionCancelled
+	return tx
+}
+
+// aDepositInCurrency is a completed deposit with the test provider ID in
+// another currency.
+func aDepositInCurrency(t *testing.T, currency domain.Currency) domain.Transaction {
+	t.Helper()
+	tx := aCompletedDeposit(t, "25.00", "5014.50")
+	tx.Currency = currency
+	return tx
+}
+
+// anotherPlayersDeposit uses the provider ID of the test deposit commands,
+// for another player and another bet.
+func anotherPlayersDeposit(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := aCompletedDeposit(t, "25.00", "31440.25")
+	tx.ID = domaintest.FakeTransactionID(98)
+	tx.UserID = anotherUserID
+	tx.BetID = 98
+	tx.OldBalance = givenAParsedMoney(t, "31415.25")
+	return tx
+}
+
+// aDepositStoredByAnotherInstance is the same request, still PENDING in
+// another API instance: same player, provider ID, amount and bet, but its own
+// transaction ID.
+func aDepositStoredByAnotherInstance(t *testing.T) domain.Transaction {
+	t.Helper()
+	tx := aPendingDeposit(t, "25.00")
+	tx.ID = domaintest.FakeTransactionID(50)
+	return tx
+}
+
+const anotherWithdrawProviderID = "prov-tx-0009"
+
+// withAnotherWithdraw adds a second completed withdraw of the test player,
+// with its own PLACED bet (8), to stored.
+func withAnotherWithdraw(t *testing.T, stored storeContents) storeContents {
+	t.Helper()
+	withdraw := theWithdraw(t, domain.TransactionCompleted)
+	withdraw.ID = domaintest.FakeTransactionID(101)
+	withdraw.ProviderTransactionID = anotherWithdrawProviderID
+	withdraw.BetID = 8
+	bet := theBet(t, domain.BetPlaced)
+	bet.ID = 8
+	return storeContents{
+		transactions: append(append([]domain.Transaction{}, stored.transactions...), withdraw),
+		bets:         append(append([]domain.Bet{}, stored.bets...), bet),
+	}
+}
+
+func identicalDepositCommands(t *testing.T, count int) []DepositCommand {
+	t.Helper()
+	commands := make([]DepositCommand, count)
+	for i := range commands {
+		commands[i] = aDepositCommand(t, "25.00")
+	}
+	return commands
+}
+
+// competingDepositCommands settle the same bet with different provider IDs.
+func competingDepositCommands(t *testing.T, count int) []DepositCommand {
+	t.Helper()
+	commands := make([]DepositCommand, count)
+	for i := range commands {
+		commands[i] = aDepositCommandWith(t, fmt.Sprintf("prov-tx-competing-%d", i), testProviderID, "25.00", "USD")
+	}
+	return commands
+}
+
+// executeDepositsConcurrently runs every command from its own goroutine at
+// once and returns every result and error, in the order of commands.
+func executeDepositsConcurrently(t *testing.T, deposit *DepositCommandHandler, commands []DepositCommand) ([]TransactionResult, []error) {
+	t.Helper()
+	results := make([]TransactionResult, len(commands))
+	errs := make([]error, len(commands))
+	var wg sync.WaitGroup
+	for i, command := range commands {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = deposit.Execute(context.Background(), command)
+		}()
+	}
+	wg.Wait()
+	return results, errs
+}
+
 func depositCall(t *testing.T, amount string) domaintest.Call {
 	t.Helper()
 	return domaintest.Call{
@@ -732,6 +1040,45 @@ func depositCall(t *testing.T, amount string) domaintest.Call {
 }
 
 // Assertions
+
+func assertDepositCalls(t *testing.T, wallet *domaintest.FakeWallet, want int) {
+	t.Helper()
+	deposits := 0
+	for _, call := range wallet.Calls() {
+		if call.Method == "Deposit" {
+			deposits++
+		}
+	}
+	if deposits != want {
+		t.Errorf("expected %d Wallet deposit(s), got %d", want, deposits)
+	}
+}
+
+func assertProcessedAndReplayedWithoutErrors(t *testing.T, result []TransactionResult, errs []error, wantProcessed, wantReplayed int) {
+	t.Helper()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: unexpected error: %v", i, err)
+		}
+	}
+	assertProcessedAndReplayed(t, result, wantProcessed, wantReplayed)
+}
+
+func assertOneSucceededAndTheOthersFailedWith(t *testing.T, errs []error, want error) {
+	t.Helper()
+	succeeded := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case !errors.Is(err, want):
+			t.Errorf("request %d: expected %v to be %q", i, err, want)
+		}
+	}
+	if succeeded != 1 {
+		t.Errorf("expected exactly 1 request to succeed, got %d", succeeded)
+	}
+}
 
 func assertNoWalletCallsAndStoreHolds(t *testing.T, fixture depositFixture, want storeContents) {
 	t.Helper()
