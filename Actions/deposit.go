@@ -365,11 +365,27 @@ func (h *DepositCommandHandler) log(level slog.Level, tx domain.Transaction, out
 	logTransaction(h.logger, level, "deposit", tx, outcome, cause)
 }
 
+// checkNoCancelInProgress returns an error if the given withdraw has a cancel in progress
+func checkNoCancelInProgress(ctx context.Context, repos domain.Repositories, userID domain.UserID, withdraw domain.Transaction) error {
+	cancel, err := repos.Transactions.FindCancelOf(ctx, userID, withdraw.ID)
+	if errors.Is(err, domain.ErrTransactionNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if cancel.Status == domain.TransactionFailed {
+		return nil
+	}
+	return fmt.Errorf("%w: the withdraw has a cancel in progress", domain.ErrTransactionPending)
+}
+
 // findBetToSettle returns the bet of the withdraw referenced by withdrawnID,
 // which this deposit can settle:
 //   - unknown, another player's, or not a withdraw → ErrTransactionNotFound (404);
 //   - in another currency than the deposit → ErrCurrencyMismatch (400);
 //   - PENDING or FAILED → ErrWithdrawNotCompleted (409);
+//   - with a cancel in progress → ErrTransactionPending (409);
 //   - its bet already settled or cancelled → ErrBetAlreadySettled (409).
 func (h *DepositCommandHandler) findBetToSettle(
 	ctx context.Context,
@@ -393,6 +409,9 @@ func (h *DepositCommandHandler) findBetToSettle(
 		}
 		if withdraw.Status == domain.TransactionPending || withdraw.Status == domain.TransactionFailed {
 			return fmt.Errorf("%w: it is %s", domain.ErrWithdrawNotCompleted, withdraw.Status)
+		}
+		if err := checkNoCancelInProgress(ctx, repos, userID, withdraw); err != nil {
+			return err
 		}
 
 		bet, err = repos.Bets.FindByID(ctx, userID, withdraw.BetID)
