@@ -51,6 +51,18 @@ func (m Money) Equal(other Money) bool {
 	return m.amount.Equal(other.amount)
 }
 
+// Add returns m + other. The sum is checked like any new amount, so it fails
+// with ErrInvalidAmount if it exceeds the upper limit.
+func (m Money) Add(other Money) (Money, error) {
+	return MoneyFromDecimal(m.amount.Add(other.amount))
+}
+
+// Sub returns m - other. Money is never negative, so it fails with
+// ErrInvalidAmount if other is greater than m.
+func (m Money) Sub(other Money) (Money, error) {
+	return MoneyFromDecimal(m.amount.Sub(other.amount))
+}
+
 func (m Money) Decimal() decimal.Decimal {
 	return m.amount
 }

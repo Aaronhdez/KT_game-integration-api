@@ -204,6 +204,76 @@ func TestMoney_JSONRoundTrip_KeepsExactValue(t *testing.T) {
 	assertTrue(t, result.Amount.Equal(original.Amount), "money should keep its exact value after a JSON round trip")
 }
 
+func TestMoney_Add_ReturnsExactSum(t *testing.T) {
+	testCases := []struct {
+		name     string
+		left     string
+		right    string
+		expected string
+	}{
+		{name: "whole amounts", left: "10", right: "5", expected: "15.00"},
+		{name: "cents carry over", left: "0.99", right: "0.01", expected: "1.00"},
+		{name: "adding zero", left: "7.25", right: "0", expected: "7.25"},
+		{name: "decimals that are inexact as float", left: "0.10", right: "0.20", expected: "0.30"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			left := givenAParsedMoney(t, testCase.left)
+			right := givenAParsedMoney(t, testCase.right)
+
+			result, err := left.Add(right)
+
+			assertNoError(t, err)
+			assertStringEquals(t, result.String(), testCase.expected, "unexpected sum")
+		})
+	}
+}
+
+func TestMoney_Add_AboveUpperLimit_ReturnsInvalidAmount(t *testing.T) {
+	left := givenAParsedMoney(t, "999999999999999999.99")
+	right := givenAParsedMoney(t, "0.01")
+
+	_, err := left.Add(right)
+
+	assertErrorIs(t, err, ErrInvalidAmount)
+}
+
+func TestMoney_Sub_ReturnsExactDifference(t *testing.T) {
+	testCases := []struct {
+		name     string
+		left     string
+		right    string
+		expected string
+	}{
+		{name: "whole amounts", left: "10", right: "4", expected: "6.00"},
+		{name: "cents borrow", left: "1.00", right: "0.01", expected: "0.99"},
+		{name: "same amount gives zero", left: "25.50", right: "25.50", expected: "0.00"},
+		{name: "decimals that are inexact as float", left: "0.30", right: "0.10", expected: "0.20"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			left := givenAParsedMoney(t, testCase.left)
+			right := givenAParsedMoney(t, testCase.right)
+
+			result, err := left.Sub(right)
+
+			assertNoError(t, err)
+			assertStringEquals(t, result.String(), testCase.expected, "unexpected difference")
+		})
+	}
+}
+
+func TestMoney_Sub_NegativeResult_ReturnsInvalidAmount(t *testing.T) {
+	left := givenAParsedMoney(t, "5")
+	right := givenAParsedMoney(t, "5.01")
+
+	_, err := left.Sub(right)
+
+	assertErrorIs(t, err, ErrInvalidAmount)
+}
+
 ////////////////////////////////////////////////////////////////////////////
 
 func givenAParsedMoney(t *testing.T, value string) Money {
