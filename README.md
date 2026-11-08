@@ -1,23 +1,68 @@
 # Game Integration API
 
+[![CI](https://github.com/Aaronhdez/KT_game-integration-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Aaronhdez/KT_game-integration-api/actions/workflows/ci.yml)
+
 Backend service (Go) that lets third-party casino games place, settle and cancel
 bets on behalf of players, keeping its records consistent with an unreliable
 Wallet service.
 
-> 🚧 Work in progress. Sections marked *TBD* are completed in the phase indicated
-> (see [`docs/plans/00-general-plan.md`](docs/plans/00-general-plan.md)).
+Developed with the assistance of Claude Opus 5.5 as a coding assistant; see
+the disclaimer in [`DESIGN.md`](DESIGN.md).
+
+## Contents
+
+- [Documentation](#documentation)
+- [Project layout](#project-layout)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+  - [Troubleshooting](#troubleshooting)
+- [Seeded players](#seeded-players)
+- [API](#api)
+  - [Pending transactions](#pending-transactions)
+- [Configuration](#configuration)
+- [Resetting the state](#resetting-the-state)
+- [Running locally (without Docker for the API)](#running-locally-without-docker-for-the-api)
+- [Running the tests](#running-the-tests)
+  - [Integration tests (PostgreSQL)](#integration-tests-postgresql)
+  - [Continuous integration](#continuous-integration)
+- [Annex: API examples](#annex-api-examples)
+  - [Login](#login)
+  - [Player information](#player-information)
+  - [Withdraw (bet placement)](#withdraw-bet-placement)
+  - [Deposit (bet settlement)](#deposit-bet-settlement)
+  - [Cancel](#cancel)
 
 ## Documentation
 
+- [`docs/openapi.yaml`](docs/openapi.yaml) — OpenAPI 3.1 specification of the API.
+- [`DESIGN.md`](DESIGN.md) — how the service behaves when the Wallet fails, and why.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — layout, layers and dependency rules.
-- [`DESIGN.md`](DESIGN.md) — failure handling, idempotency and other decisions.
-- [`docs/plans/`](docs/plans/) — master plan and per-phase plans.
+- [`docs/try-it.md`](docs/try-it.md) — a complete round trip with `curl` (bash and PowerShell).
+- [`docs/wallet-findings.md`](docs/wallet-findings.md) — how the mock Wallet actually behaves (spike).
+- [`docs/decisions.md`](docs/decisions.md) — the full reasoning, measurements and per-topic decisions.
+
 - [`AGENTS.md`](AGENTS.md) — conventions for AI coding agents.
+- [`docs/plans/`](docs/plans/) — master plan and per-phase plans.
+
+## Project layout
+
+```
+Startup/       main, configuration, wiring, router, background resolver
+Application/   HTTP handlers, DTOs, auth middleware, error → HTTP mapping
+Actions/       state-changing use cases: Login, Withdraw, Deposit, Cancel, ResolvePending
+Queries/       read-only use cases: GetPlayer
+Domain/        entities, money, rules, errors and ports (interfaces); domaintest/ fakes
+Persistence/   PostgreSQL repositories, per-player lock, migrations and seed
+Shared/        Wallet HTTP client, JWT, bcrypt, clock, IDs
+docs/          design details, try-it walkthrough, OpenAPI spec, Wallet findings, plans
+```
+
+Dependency rules and the request flow are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requirements
 
 - Docker + Docker Compose
-- Go (latest stable) — only to run tests or the service outside Docker
+- Go (latest stable, 64-bit) — only to run the tests or the service outside Docker
 
 ## Quick start
 
@@ -34,6 +79,9 @@ takes a minute or two). Then:
 ```bash
 curl http://localhost:8080/health      # {"status":"ok"}
 ```
+
+To see it working end to end — log in, place a bet, replay it, settle it and
+cancel it — follow [`docs/try-it.md`](docs/try-it.md).
 
 | Service | URL (localhost only) | Notes |
 |---|---|---|
@@ -59,16 +107,118 @@ read from `.env`.
 ### Troubleshooting
 
 - **Port already in use** (`8080`, `8000` or `5432`): stop whatever uses it
-  (e.g. a local PostgreSQL or an older `gameapi-db` container) and run
-  `docker compose up` again.
+  (e.g. a local PostgreSQL) and run `docker compose up` again.
 - **Platform warning for `wallet`** (`linux/arm64` … `linux/amd64`): expected.
   The Wallet image is only built for arm64 and Docker emulates it on other
   hosts; it works, just a bit slower.
-- **The API cannot connect after changing `POSTGRES_PASSWORD`**: PostgreSQL
-  reads it only when its volume is first created. Run `docker compose down -v`
-  (deletes the data) and start again.
+- **The API exits with "password authentication failed"** after changing
+  `POSTGRES_PASSWORD`: PostgreSQL reads it only when its volume is first
+  created. Run `docker compose down -v` (deletes the data) and start again.
 - **Use only letters, digits, `-` and `_` in `POSTGRES_PASSWORD`**: it is put
   into `DATABASE_URL` without URL-encoding.
+
+## Seeded players
+
+Created by the migration `Persistence/migrations/00004_seed_players.sql` when the
+service starts. They match the users of the Wallet mock; the database stores
+only bcrypt hashes of these passwords (test credentials, valid only locally).
+
+| Username | Password | Wallet user ID | Currency | Initial Wallet balance |
+|---|---|---|---|---|
+| `player_usd` | `usd-pass-2026` | 34633089486 | USD | 5000 |
+| `player_eur` | `eur-pass-2026` | 34679664254 | EUR | 9000000000 |
+| `player_kes` | `kes-pass-2026` | 34616761765 | KES | 750.5 |
+| `player_usd_2` | `usd2-pass-2026` | 34673635133 | USD | 31415.25 |
+
+## API
+
+Base path `/api/v1`. All endpoints except login require `Authorization: Bearer <JWT>`.
+The full contract is in [`docs/openapi.yaml`](docs/openapi.yaml) (open it in
+e.g. https://editor.swagger.io).
+
+| Method | Path | Description | Example |
+|---|---|---|---|
+| POST | `/auth/login` | Get a JWT | [Annex](#login) |
+| GET | `/player` | Player info and live balance | [Annex](#player-information) |
+| POST | `/withdraw` | Place a bet (take the stake) | [Annex](#withdraw-bet-placement) |
+| POST | `/deposit` | Settle a bet (pay the outcome) | [Annex](#deposit-bet-settlement) |
+| POST | `/cancel` | Revert a withdraw or deposit | [Annex](#cancel) |
+
+`GET /health` (no token) reports that the process is up. The
+[annex](#annex-api-examples) has a `curl` call, the response and every status
+code of each endpoint.
+
+Errors always have the body `{"code": "...", "message": "..."}`:
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | Malformed JSON, missing or invalid fields (the message says which) |
+| 401 | `UNAUTHORIZED` | Wrong credentials, or missing / invalid / expired token (same message for all) |
+| 404 | `NOT_FOUND` | Unknown route or method, or a resource that does not exist or belongs to another player |
+| 409 | `CONFLICT` | Idempotency conflict or invalid state (the message says which) |
+| 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the operation for insufficient funds |
+| 502 | `WALLET_ERROR` | The Wallet failed or rejected the call, and nothing was applied |
+| 504 | `WALLET_TIMEOUT` | The Wallet did not answer a read in time (`GET /player` only; an operation with an unknown outcome is a `202`) |
+| 500 | `INTERNAL_ERROR` | Unexpected failure (e.g. database down). Not in the assessment; details only in the logs |
+
+### Pending transactions
+
+A `202` means the Wallet may or may not have applied the operation (a `500`, a
+dropped connection or a timeout). The transaction stays `PENDING` until we
+know, and is resolved by **sending the identical request to the Wallet
+again**, which never applies it twice: the Wallet answers that it already has
+it (it had been applied) or applies it now. Two things trigger that re-send:
+
+- **A retry of the same request** by the provider. If the last attempt
+  started at least 10 s ago, the retry re-sends it and answers the final
+  result: `200` (completed), `422` / `502` (failed), or `202` again if the
+  Wallet's answer is still unknown. Before 10 s it answers `202` straight away.
+- **A background resolver**, run at startup and then every
+  `PENDING_RESOLVER_INTERVAL`, for providers that never retry. A `PENDING`
+  transaction is usually resolved within about 20 s.
+
+The 10 s wait avoids re-sending while the first attempt may still be running
+inside the Wallet. A transaction still unknown after 5 minutes is logged at
+`error` level (`"outcome":"pending_overdue"`) on every new attempt. Details
+in [`DESIGN.md`](DESIGN.md) §3.
+
+## Configuration
+
+All configuration comes from environment variables; [`.env.example`](.env.example)
+lists them with working values for Docker Compose. An invalid value stops the
+service at startup with an error naming the variable.
+
+| Variable | Description | Default |
+|---|---|---|
+| `HTTP_PORT` | API listen port (1–65535) | `8080` |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (case-insensitive) | `info` |
+| `SHUTDOWN_TIMEOUT` | Max time to finish in-flight requests on shutdown (Go duration: `500ms`, `10s`, `1m`) | `10s` |
+| `DATABASE_URL` | PostgreSQL connection string (**required**). Pool options such as `pool_max_conns=10` can be added as URL parameters. Set by Compose | — |
+| `WALLET_BASE_URL` | Wallet base URL (absolute `http`/`https` URL). Set by Compose | `http://wallet:8000` |
+| `WALLET_API_KEY` | Wallet `x-api-key` header (**required**; the mock's key is in `.env.example`) | — |
+| `WALLET_OPERATION_TIMEOUT` | Timeout per withdraw/deposit call to the Wallet | `6s` |
+| `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` |
+| `JWT_SECRET` | HMAC-SHA256 key that signs the JWTs (**required**, at least 32 bytes) | — |
+| `JWT_TTL` | Token lifetime (Go duration) | `1h` |
+| `PENDING_RESOLVER_INTERVAL` | How often `PENDING` transactions are re-sent to the Wallet in the background (see [Pending transactions](#pending-transactions)) | `10s` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Read by the compose `postgres` service (and used to build `DATABASE_URL`) | — |
+
+## Resetting the state
+
+The Wallet is in-memory and resets to its initial balances whenever its
+container stops, while our database persists in the `pgdata` volume. To reset
+both:
+
+```bash
+docker compose down -v      # removes the containers and the pgdata volume
+docker compose up -d --wait # fresh database (migrations + seed) and fresh Wallet
+```
+
+Always reset both together: resetting only one of them leaves our records and
+the Wallet's balances out of step (see `DESIGN.md` §2, "Wallet restarts and
+loses its state"). For the same reason, `docker compose stop`, `restart` or
+`down` **without** `-v` are not a clean state: they keep our database but
+reset the Wallet. To restart only the API, use `docker compose restart api`.
 
 ## Running locally (without Docker for the API)
 
@@ -99,14 +249,12 @@ In PowerShell: `$env:DATABASE_URL="postgres://gameapi:change-me@localhost:5432/g
 Use the password of your `.env` if you changed it. `WALLET_BASE_URL` is needed
 because its default is the Docker Compose host name (`http://wallet:8000`).
 If the database cannot be reached within 10 seconds the service exits with
-code 1.
+code 1. Stop the compose `api` service first (`docker compose stop api`), or
+set `HTTP_PORT` to another port, since both listen on `8080`.
 
 On Windows PowerShell use `curl.exe` (plain `curl` is an alias of
 `Invoke-WebRequest`). Stop the service with Ctrl+C: it finishes in-flight
 requests (up to `SHUTDOWN_TIMEOUT`) and exits with code 0.
-
-To override a setting, set the variable in the shell before running, e.g.
-`$env:HTTP_PORT="9090"` (PowerShell) or `HTTP_PORT=9090 go run ./Startup` (bash).
 
 ## Running the tests
 
@@ -116,6 +264,11 @@ go vet ./...
 go vet -tags=integration ./...    # also checks the integration test files
 go test ./...                     # unit tests, no Docker needed
 ```
+
+The unit tests cover the business rules with a fake Wallet that simulates
+success, insufficient funds, errors before and after applying, timeouts and
+slow answers deterministically, including idempotency (replays, conflicts,
+concurrent duplicates) and every cancel case of the assessment.
 
 ### Integration tests (PostgreSQL)
 
@@ -139,66 +292,18 @@ with fresh IDs, so the test database must not be the one the service uses.
 To make VS Code (gopls) analyse these files, add
 `"gopls": { "buildFlags": ["-tags=integration"] }` to your user settings.
 
-## Configuration
+### Continuous integration
 
-All configuration comes from environment variables. See [`.env.example`](.env.example).
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+pull request, in four parallel jobs: formatting, `go vet`, build and unit
+tests with the race detector (`go test -race`); the integration tests against
+a PostgreSQL 16 service container; the Docker image build; and the OpenAPI
+lint (`npx @redocly/cli lint docs/openapi.yaml`).
 
-An invalid value stops the service at startup with an error naming the variable.
+## Annex: API examples
 
-| Variable | Description | Default | Read from |
-|---|---|---|---|
-| `HTTP_PORT` | API listen port (1–65535) | `8080` | Phase 02 |
-| `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (case-insensitive) | `info` | Phase 02 |
-| `SHUTDOWN_TIMEOUT` | Max time to finish in-flight requests on shutdown (Go duration: `500ms`, `10s`, `1m`) | `10s` | Phase 02 |
-| `DATABASE_URL` | PostgreSQL connection string (**required**). Pool options such as `pool_max_conns=10` can be added as URL parameters | — | Phase 04 |
-| `WALLET_BASE_URL` | Wallet base URL (absolute `http`/`https` URL) | `http://wallet:8000` | Phase 05 |
-| `WALLET_API_KEY` | Wallet `x-api-key` header (**required**; the mock's key is in `.env.example`) | — | Phase 05 |
-| `WALLET_OPERATION_TIMEOUT` | Timeout per withdraw/deposit call to the Wallet | `6s` | Phase 05 |
-| `WALLET_BALANCE_TIMEOUT` | Timeout per balance read attempt (retried once) | `10s` | Phase 05 |
-| `JWT_SECRET` | HMAC-SHA256 key that signs the JWTs (**required**, at least 32 bytes) | — | Phase 06 |
-| `JWT_TTL` | Token lifetime (Go duration) | `1h` | Phase 06 |
-| `PENDING_RESOLVER_INTERVAL` | How often `PENDING` transactions are re-sent to the Wallet in the background (see [Pending transactions](#pending-transactions)) | `10s` | Phase 11 |
-
-Variables of later phases are listed in advance; the service ignores them until
-the phase that reads them is implemented.
-
-## Seeded players
-
-Created by the migration `Persistence/migrations/00004_seed_players.sql` when the
-service starts. They match the users of the Wallet mock; the database stores
-only bcrypt hashes of these passwords (test credentials, valid only locally).
-
-| Username | Password | Wallet user ID | Currency | Initial Wallet balance |
-|---|---|---|---|---|
-| `player_usd` | `usd-pass-2026` | 34633089486 | USD | 5000 |
-| `player_eur` | `eur-pass-2026` | 34679664254 | EUR | 9000000000 |
-| `player_kes` | `kes-pass-2026` | 34616761765 | KES | 750.5 |
-| `player_usd_2` | `usd2-pass-2026` | 34673635133 | USD | 31415.25 |
-
-## API
-
-Base path `/api/v1`. All endpoints except login require `Authorization: Bearer <JWT>`.
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/auth/login` | Get a JWT |
-| GET | `/player` | Player info and live balance |
-| POST | `/withdraw` | Place a bet (take the stake) |
-| POST | `/deposit` | Settle a bet (pay the outcome) |
-| POST | `/cancel` | Revert a withdraw or deposit |
-
-Errors always have the body `{"code": "...", "message": "..."}`:
-
-| Status | Code | When |
-|---|---|---|
-| 400 | `INVALID_REQUEST` | Malformed JSON, missing or invalid fields (the message says which) |
-| 401 | `UNAUTHORIZED` | Wrong credentials, or missing / invalid / expired token (same message for all) |
-| 404 | `NOT_FOUND` | Unknown route or method, or a resource that does not exist or belongs to another player |
-| 409 | `CONFLICT` | Idempotency conflict or invalid state (the message says which) |
-| 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the operation for insufficient funds |
-| 502 | `WALLET_ERROR` | The Wallet failed or rejected the call, and nothing was applied |
-| 504 | `WALLET_TIMEOUT` | The Wallet did not answer a read in time (`GET /player` only; an operation with an unknown outcome is a `202`) |
-| 500 | `INTERNAL_ERROR` | Unexpected failure (e.g. database down). Not in the assessment; details only in the logs |
+Every endpoint with a `curl` call, its response and every status code it
+can return. The same contract is in [`docs/openapi.yaml`](docs/openapi.yaml).
 
 ### Login
 
@@ -282,7 +387,7 @@ curl -i -X POST http://localhost:8080/api/v1/deposit \
 `providerWithdrawnTransactionId` is the withdraw whose bet is settled. An
 amount greater than zero settles it as `WON`; `0` settles it as `LOST`, is
 **not sent to the Wallet** (no money moves) and answers `201` with
-`oldBalance` = `newBalance` (see `DESIGN.md` §4).
+`oldBalance` = `newBalance` (see `DESIGN.md` §5).
 
 | Status | When |
 |---|---|
@@ -326,43 +431,3 @@ ID; `providerTransactionId` is the cancelled transaction's.
 | `409` | The transaction is `PENDING` or `FAILED`; or a withdraw whose bet is settled (cancel the deposit first) or has a deposit in progress |
 | `422` | Insufficient funds to take a deposit back: the cancel is kept as `FAILED`, nothing else changes. A retry gets `422` again, without calling the Wallet |
 | `502` | The Wallet rejected the compensation (a retry gets `502` again), or the balance before it could not be read (nothing was sent) |
-
-### Pending transactions
-
-A `202` means the Wallet may or may not have applied the operation (a `500`, a
-dropped connection or a timeout). The transaction stays `PENDING` until we
-know, and is resolved by **sending the identical request to the Wallet
-again**, which never applies it twice: the Wallet answers that it already has
-it (it had been applied) or applies it now. Two things trigger that re-send:
-
-- **A retry of the same request** by the provider. If the last attempt
-  started at least 10 s ago, the retry re-sends it and answers the final
-  result: `200` (completed), `422` / `502` (failed), or `202` again if the
-  Wallet's answer is still unknown. Before 10 s it answers `202` straight away.
-- **A background resolver**, run at startup and then every
-  `PENDING_RESOLVER_INTERVAL`, for providers that never retry. A `PENDING`
-  transaction is usually resolved within about 20 s.
-
-The 10 s wait avoids re-sending while the first attempt may still be running
-inside the Wallet. A transaction still unknown after 5 minutes is logged at
-`error` level (`"outcome":"pending_overdue"`) on every new attempt. Details
-in [`DESIGN.md`](DESIGN.md) §2.
-
-*More `curl` examples and OpenAPI spec: Phase 13.*
-
-## Resetting the state
-
-The Wallet is in-memory and resets to its initial balances whenever its
-container stops, while our database persists in the `pgdata` volume. To reset
-both:
-
-```bash
-docker compose down -v      # removes the containers and the pgdata volume
-docker compose up -d --wait # fresh database (migrations + seed) and fresh Wallet
-```
-
-Always reset both together: resetting only one of them leaves our records and
-the Wallet's balances out of step (see `DESIGN.md` §1, "Wallet restarts and
-loses its state"). For the same reason, `docker compose stop`, `restart` or
-`down` **without** `-v` are not a clean state: they keep our database but
-reset the Wallet. To restart only the API, use `docker compose restart api`.
