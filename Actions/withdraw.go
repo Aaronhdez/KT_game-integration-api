@@ -251,7 +251,7 @@ func (h *WithdrawCommandHandler) log(level slog.Level, tx domain.Transaction, ou
 // replayIfProcessed looks for a transaction already stored for providerID.
 // found is false when there is none. When there is one, the stored result is
 // returned without any Wallet call (§7.1, §7.2):
-//   - another amount or currency → ErrIdempotencyConflict (409);
+//   - not a withdraw, or another amount or currency → ErrIdempotencyConflict (409);
 //   - FAILED → ErrPreviousAttemptFailed (409);
 //   - PENDING → the transaction, with no bet (202);
 //   - otherwise (COMPLETED, CANCELLED) → its current state and its bet's (200).
@@ -275,7 +275,10 @@ func (h *WithdrawCommandHandler) replayIfProcessed(
 		}
 		found = true
 
-		if !previous.Amount.Equal(amount) || previous.Currency != currency {
+		// The lookup also returns deposits: a deposit with this provider ID
+		// is another request, never an earlier attempt of this withdraw.
+		if previous.Type != domain.TransactionWithdraw ||
+			!previous.Amount.Equal(amount) || previous.Currency != currency {
 			return domain.ErrIdempotencyConflict
 		}
 

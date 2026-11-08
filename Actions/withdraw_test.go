@@ -474,6 +474,28 @@ func TestWithdraw_SameProviderIDWithAnotherAmount_DoesNotCallTheWallet(t *testin
 	assertWalletCalls(t, fixture.wallet)
 }
 
+// A deposit with the same provider ID, amount and currency is another request,
+// not an earlier attempt of this withdraw.
+func TestWithdraw_ProviderIDOfADeposit_IsIdempotencyConflict(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aDepositWithTheTestProviderID(t, "10.50"))
+	fixture.store.PutBet(aBetWithStatus(t, "10.50", domain.BetWon))
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, domain.ErrIdempotencyConflict)
+}
+
+func TestWithdraw_ProviderIDOfADeposit_DoesNotCallTheWallet(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.PutTransaction(aDepositWithTheTestProviderID(t, "10.50"))
+	fixture.store.PutBet(aBetWithStatus(t, "10.50", domain.BetWon))
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet)
+}
+
 // §6.1: provider transaction IDs are unique across the whole system. The
 // other player's transaction is never returned, only "the ID is taken".
 func TestWithdraw_ProviderIDOfAnotherPlayer_IsTransactionExists(t *testing.T) {
@@ -677,6 +699,16 @@ func anotherPlayersWithdraw(t *testing.T) domain.Transaction {
 	tx.UserID = anotherUserID
 	tx.BetID = 99
 	tx.OldBalance = givenAParsedMoney(t, "31415.25")
+	return tx
+}
+
+// aDepositWithTheTestProviderID is a completed deposit of the test player that
+// uses the provider transaction ID of the test withdraw commands.
+func aDepositWithTheTestProviderID(t *testing.T, amount string) domain.Transaction {
+	t.Helper()
+	tx := aCompletedWithdraw(t, amount, "5010.50")
+	tx.ID = domaintest.FakeTransactionID(70)
+	tx.Type = domain.TransactionDeposit
 	return tx
 }
 
