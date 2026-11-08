@@ -170,7 +170,7 @@ func (handler *WithdrawCommandHandler) finish(
 	case walletAppliedBalanceUnknown:
 		// The balance right after the first attempt: its old balance was read
 		// under the player's lock just before it.
-		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(pending.Amount.Decimal()))
+		derived, err := pending.OldBalance.Sub(pending.Amount)
 		if err != nil {
 			return handler.leavePending(pending, nil, "balance_unknown", err), nil
 		}

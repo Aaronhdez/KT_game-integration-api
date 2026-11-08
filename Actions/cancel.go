@@ -321,9 +321,9 @@ func (handler *CancelCommandHandler) sendCompensation(ctx context.Context, actio
 // compensation without reporting it: the old balance plus or minus the amount.
 func balanceAfterCompensation(oldBalance domain.Money, decision domain.CancelDecision) (domain.Money, error) {
 	if decision.Action == domain.CancelCreditBack {
-		return domain.MoneyFromDecimal(oldBalance.Decimal().Add(decision.Amount.Decimal()))
+		return oldBalance.Add(decision.Amount)
 	}
-	return domain.MoneyFromDecimal(oldBalance.Decimal().Sub(decision.Amount.Decimal()))
+	return oldBalance.Sub(decision.Amount)
 }
 
 // complete stores, in one database transaction, the cancel as COMPLETED, the

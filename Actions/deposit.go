@@ -193,7 +193,7 @@ func (handler *DepositCommandHandler) finish(
 	case walletAppliedBalanceUnknown:
 		// The balance right after the first attempt: its old balance was read
 		// under the player's lock just before it.
-		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Add(pending.Amount.Decimal()))
+		derived, err := pending.OldBalance.Add(pending.Amount)
 		if err != nil {
 			return handler.leavePending(pending, &bet.Status, "balance_unknown", err), nil
 		}
