@@ -121,6 +121,16 @@ existing test**.
 
 None.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| — | The receiver `h` is named `handler` in the handlers of `Actions`, `login.go` included (the same name `GetPlayerQueryHandler` already used) | Asked by the developer when reviewing step 2, for readability. Committed with step 2. |
+| One table test with every case, `nil` included | `nil` has its own test; the table holds only errors, and the "wrapped" test reuses it | Avoids an `if` inside a test body (the developer's test style). |
+| — | `walletOutcome` has a `String()` method | A failing test prints "expected not applied, got unknown" instead of "expected 2, got 3". |
+
+No behaviour change, and no existing test was modified.
+
 ## Definition of done
 
 - `fail`, `leavePending`, `log`, `readOldBalance` and the outcome-write context
