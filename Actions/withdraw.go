@@ -90,7 +90,30 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 		return TransactionResult{}, fmt.Errorf("withdraw: wallet currency %s, account currency %s: %w", balance.Currency, player.Currency, domain.ErrWalletFailure)
 	}
 
-	// The old balance becomes part of the PENDING transaction in the next step.
-	_ = balance
-	return TransactionResult{}, nil
+	var pending domain.Transaction
+	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		betID, err := repos.Bets.NextID(ctx)
+		if err != nil {
+			return err
+		}
+		pending, err = domain.NewWithdraw(domain.TransactionDetails{
+			ID:                    h.ids.NewTransactionID(),
+			UserID:                player.UserID,
+			BetID:                 betID,
+			ProviderTransactionID: providerID,
+			Amount:                amount,
+			Currency:              player.Currency,
+			OldBalance:            balance.Amount,
+		}, h.clock.Now())
+		if err != nil {
+			return err
+		}
+		return repos.Transactions.Insert(ctx, pending)
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("withdraw: store pending: %w", err)
+	}
+
+	// The Wallet call and the outcome come in the next step.
+	return TransactionResult{Transaction: pending}, nil
 }

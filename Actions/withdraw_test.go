@@ -143,6 +143,28 @@ func TestWithdraw_WalletBalanceInAnotherCurrency_DoesNotWithdrawNorStoreAnything
 	assertOnlyTheBalanceWasReadAndNothingStored(t, fixture)
 }
 
+// Database failures
+
+func TestWithdraw_PendingInsertFails_ReturnsItsError(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	_, err := fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertErrorIs(t, err, errDatabaseDown)
+}
+
+// Without a stored PENDING row, a Wallet call could be applied with no trace
+// of it in our database (§9.1).
+func TestWithdraw_PendingInsertFails_DoesNotCallTheWalletWithdraw(t *testing.T) {
+	fixture := givenAWithdraw(t)
+	fixture.store.InsertTransactionErr = errDatabaseDown
+
+	fixture.withdraw.Execute(context.Background(), aWithdrawCommand(t, "10.50"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall())
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 // withdrawFixture keeps the fakes reachable, so a test can script or break one
