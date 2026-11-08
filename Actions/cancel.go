@@ -129,16 +129,16 @@ func (handler *CancelCommandHandler) cancelLocked(
 
 	// Until the cancel completes, the original and its bet do not change.
 	betStatus := &target.bet.Status
-	switch {
-	case walletErr == nil:
+	switch classifyWalletResult(walletErr) {
+	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, target, newBalance)
-	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+	case walletAppliedBalanceUnknown:
 		derived, err := balanceAfterCompensation(pending.OldBalance, target.decision)
 		if err != nil {
 			return handler.leavePending(pending, betStatus, "balance_unknown", err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, target, derived)
-	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
+	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, betStatus, walletErr)
 	default:
 		// Unknown outcome: it stays PENDING and the API answers 202.

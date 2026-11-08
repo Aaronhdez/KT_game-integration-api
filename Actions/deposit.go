@@ -142,17 +142,17 @@ func (handler *DepositCommandHandler) depositLocked(
 	defer cancel()
 
 	// A pending deposit leaves its bet PLACED, and that status is reported.
-	switch {
-	case walletErr == nil:
+	switch classifyWalletResult(walletErr) {
+	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, bet, newBalance)
-	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+	case walletAppliedBalanceUnknown:
 		// Exact: the old balance was read under the player's lock just before.
 		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Add(amount.Decimal()))
 		if err != nil {
 			return handler.leavePending(pending, &bet.Status, "balance_unknown", err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, bet, derived)
-	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
+	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, &bet.Status, walletErr)
 	default:
 		// Unknown outcome: it stays PENDING and the API answers 202.

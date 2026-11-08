@@ -132,17 +132,17 @@ func (handler *WithdrawCommandHandler) withdrawLocked(
 	writeCtx, cancel := handler.outcomeContext(ctx)
 	defer cancel()
 
-	switch {
-	case walletErr == nil:
+	switch classifyWalletResult(walletErr) {
+	case walletApplied:
 		return handler.complete(writeCtx, uow, pending, newBalance)
-	case errors.Is(walletErr, domain.ErrWalletAppliedBalanceUnknown):
+	case walletAppliedBalanceUnknown:
 		// Exact: the old balance was read under the player's lock just before.
 		derived, err := domain.MoneyFromDecimal(pending.OldBalance.Decimal().Sub(amount.Decimal()))
 		if err != nil {
 			return handler.leavePending(pending, nil, "balance_unknown", err), nil
 		}
 		return handler.complete(writeCtx, uow, pending, derived)
-	case errors.Is(walletErr, domain.ErrInsufficientFunds), errors.Is(walletErr, domain.ErrWalletRejected):
+	case walletNotApplied:
 		return handler.fail(writeCtx, uow, pending, nil, walletErr)
 	default:
 		// Unknown outcome (§9.3): it stays PENDING and the API answers 202.
