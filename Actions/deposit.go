@@ -85,6 +85,10 @@ func (handler *DepositCommandHandler) depositLocked(
 	currency domain.Currency,
 ) (TransactionResult, error) {
 	if result, found, err := handler.replayIfProcessed(ctx, uow, player.UserID, providerID, withdrawnID, amount, currency); found || err != nil {
+		if err == nil && result.Transaction.Status == domain.TransactionPending {
+			// A retry of a PENDING deposit re-sends it, if it is due.
+			return asReplay(handler.resendPending(ctx, uow, result.Transaction))
+		}
 		return result, err
 	}
 
@@ -130,14 +134,43 @@ func (handler *DepositCommandHandler) depositLocked(
 
 	// Our transaction ID is the reference: the Wallet de-duplicates re-sends by
 	// it (docs/wallet-findings.md, Q8).
-	newBalance, walletErr := handler.wallet.Deposit(ctx, domain.WalletOperation{
-		UserID:    player.UserID,
-		Currency:  player.Currency,
-		Amount:    amount,
-		BetID:     bet.ID,
-		Reference: pending.ID,
-	})
+	newBalance, walletErr := handler.wallet.Deposit(ctx, walletOperationOf(pending))
 	return handler.finish(ctx, uow, pending, bet, newBalance, walletErr)
+}
+
+// resendPending sends a PENDING deposit to the Wallet again, with the same
+// request as its first attempt, and stores the outcome with the same rules
+// (finish). Nothing is sent if it is not due (see startResend); the result is
+// then the deposit as stored, with its bet's status. The caller holds the
+// player's lock.
+//
+// While the deposit is PENDING its bet stays PLACED: another deposit is
+// refused by the active-settlement index and a cancel of the withdraw by
+// FindActiveDeposit, so the bet can still be settled when it completes.
+func (handler *DepositCommandHandler) resendPending(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction) (TransactionResult, error) {
+	var (
+		current domain.Transaction
+		bet     domain.Bet
+		due     bool
+	)
+	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		var err error
+		current, due, err = handler.startResend(ctx, repos, pending)
+		if err != nil {
+			return err
+		}
+		bet, err = repos.Bets.FindByID(ctx, current.UserID, current.BetID)
+		return err
+	})
+	if err != nil {
+		return TransactionResult{}, fmt.Errorf("deposit: resend: %w", err)
+	}
+	if !due {
+		return TransactionResult{Transaction: current, BetStatus: &bet.Status}, nil
+	}
+
+	newBalance, walletErr := handler.wallet.Deposit(ctx, walletOperationOf(current))
+	return handler.finish(ctx, uow, current, bet, newBalance, walletErr)
 }
 
 // finish stores what the Wallet's answer means for the pending deposit and

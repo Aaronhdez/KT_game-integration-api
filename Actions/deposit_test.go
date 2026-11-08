@@ -444,13 +444,118 @@ func TestDeposit_ReplayOfAPendingDeposit_ReturnsItPendingWithBetStatusPlaced(t *
 	assertReplayOf(t, result, err, aPendingDeposit(t, "25.00"), betStatus(domain.BetPlaced))
 }
 
-// Resolving a PENDING deposit (re-sending it to the Wallet) is Phase 11.
+// Its last attempt started less than resendDelay ago: re-sending now could
+// race it inside the Wallet (findings Q8).
 func TestDeposit_ReplayOfAPendingDeposit_DoesNotCallTheWallet(t *testing.T) {
 	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aPendingDeposit(t, "25.00")))
 
 	fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
 
 	assertWalletCalls(t, fixture.wallet)
+}
+
+// Re-send on retry (§9.4): the rules shared with withdraw (the delay, the
+// attempt recorded first, the overdue log) are tested there.
+
+func TestDeposit_RetryJustBeforeTheResendDelay_DoesNotResend(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailAfterApply)
+
+	fixture.depositAt(testNow.Add(resendDelay-time.Second)).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, "25.00"))
+}
+
+func TestDeposit_RetryAfterTheResendDelay_ResendsTheIdenticalRequest(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+
+	fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletCalls(t, fixture.wallet, balanceCall(), depositCall(t, "25.00"), depositCall(t, "25.00"))
+}
+
+// The Wallet de-duplicates the re-send (409 → applied, balance unknown).
+func TestDeposit_RetryOfADepositTheWalletHadApplied_ReturnsItCompletedAsAReplayWithTheBetWon(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailAfterApply)
+
+	result, err := fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, resentAt(aCompletedDeposit(t, "25.00", "5014.50"), resendTime), betStatus(domain.BetWon))
+}
+
+func TestDeposit_RetryOfADepositTheWalletHadApplied_StoresItCompletedAndTheBetWon(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailAfterApply)
+
+	fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, storeContents{
+		transactions: []domain.Transaction{resentAt(aCompletedDeposit(t, "25.00", "5014.50"), resendTime), theWithdraw(t, domain.TransactionCompleted)},
+		bets:         []domain.Bet{theBetAt(t, domain.BetWon, resendTime)},
+	})
+}
+
+func TestDeposit_RetryOfADepositTheWalletHadApplied_PaysOnlyOnce(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailAfterApply)
+
+	fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertWalletBalance(t, fixture.wallet, "5014.50")
+}
+
+// The Wallet applies the re-send now, so the balance it reports is the true
+// one after it, even if other operations ran since the old balance was read.
+func TestDeposit_RetryOfADepositTheWalletHadNotApplied_CompletesWithTheBalanceTheWalletReports(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	givenThePlayerWonElsewhereMeanwhile(t, fixture.wallet, "100.00")
+
+	result, err := fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertResultTransaction(t, result, err, resentAt(aCompletedDeposit(t, "25.00", "5114.50"), resendTime))
+}
+
+func TestDeposit_ResendRejected_IsWalletRejected(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.Reject)
+
+	_, err := fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrWalletRejected)
+}
+
+// A FAILED deposit leaves its bet PLACED, so it can still be settled.
+func TestDeposit_ResendRejected_StoresItFailedWithTheReasonAndTheBetPlaced(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.Reject)
+
+	fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, resentAt(aFailedDeposit(t, "25.00", domain.FailureWalletRejected), resendTime)))
+}
+
+func TestDeposit_ResendOutcomeStillUnknown_ReturnsItPendingAsAReplayWithTheBetPlaced(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	result, err := fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertReplayOf(t, result, err, resentAt(aPendingDeposit(t, "25.00"), resendTime), betStatus(domain.BetPlaced))
+}
+
+func TestDeposit_ResendOutcomeStillUnknown_StoresTheTimeOfTheNewAttempt(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	fixture.depositAt(resendTime).Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertStoreHolds(t, fixture.store, theArrangedStoreWith(t, resentAt(aPendingDeposit(t, "25.00"), resendTime)))
+}
+
+func TestDeposit_ConcurrentRetriesAfterTheResendDelay_ResendOnlyOnce(t *testing.T) {
+	fixture := givenADepositLeftPendingBy(t, domaintest.FailBeforeApply)
+	fixture.wallet.Next(domaintest.TimeOut)
+
+	executeDepositsConcurrently(t, fixture.depositAt(resendTime), identicalDepositCommands(t, 10))
+
+	assertDepositCalls(t, fixture.wallet, 2)
 }
 
 // §7.1: same key, same result. A FAILED row without reason was stored
@@ -858,14 +963,38 @@ func newDepositFixture(t *testing.T, players *domaintest.FakePlayerRepository, s
 
 // depositWith builds the handler with another Wallet (a wrapper of the fake).
 func (fixture depositFixture) depositWith(wallet domain.WalletClient) *DepositCommandHandler {
+	return fixture.depositWithAt(wallet, testNow)
+}
+
+// depositAt builds a handler whose clock says now, on the same store and
+// Wallet: a later request of the same provider.
+func (fixture depositFixture) depositAt(now time.Time) *DepositCommandHandler {
+	return fixture.depositWithAt(fixture.wallet, now)
+}
+
+func (fixture depositFixture) depositWithAt(wallet domain.WalletClient, now time.Time) *DepositCommandHandler {
 	return NewDepositCommandHandler(
 		fixture.players,
 		fixture.store,
 		wallet,
 		&domaintest.FakeIDGenerator{},
-		domaintest.FixedClock{Time: testNow},
+		domaintest.FixedClock{Time: now},
 		slog.New(slog.NewJSONHandler(fixture.logs, nil)),
 	)
+}
+
+// givenADepositLeftPendingBy runs a first deposit of 25.00 at testNow whose
+// Wallet call ends with behaviour (one of unknownOutcomes), so it is stored
+// PENDING and its bet stays PLACED.
+func givenADepositLeftPendingBy(t *testing.T, behaviour domaintest.Behaviour) depositFixture {
+	t.Helper()
+	fixture := givenADeposit(t)
+	fixture.wallet.Next(domaintest.Succeed, behaviour)
+	result, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+	if err != nil || result.Transaction.Status != domain.TransactionPending {
+		t.Fatalf("arrange: expected a PENDING deposit, got %+v, %v", result.Transaction, err)
+	}
+	return fixture
 }
 
 func theArrangedStore(t *testing.T) storeContents {
@@ -958,6 +1087,14 @@ func theBet(t *testing.T, status domain.BetStatus) domain.Bet {
 	t.Helper()
 	bet := domain.NewPlacedBet(testBetID, testUserID, domain.USD, givenAParsedMoney(t, testWithdrawnStake), testNow)
 	bet.Status = status
+	return bet
+}
+
+// theBetAt is the bet after its status changed at updatedAt.
+func theBetAt(t *testing.T, status domain.BetStatus, updatedAt time.Time) domain.Bet {
+	t.Helper()
+	bet := theBet(t, status)
+	bet.UpdatedAt = updatedAt
 	return bet
 }
 
