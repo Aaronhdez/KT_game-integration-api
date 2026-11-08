@@ -264,6 +264,19 @@ func TestDeposit_WithdrawWithAPendingCancel_DoesNotCallTheWalletNorStoreAnything
 	assertNoWalletCallsAndStoreHolds(t, fixture, stored)
 }
 
+// Once the cancel is COMPLETED it is no longer "in progress": the bet is
+// CANCELLED, which is the reason given.
+func TestDeposit_WithdrawCancelledByACompletedCancel_IsBetAlreadySettled(t *testing.T) {
+	fixture := givenADepositWithStore(t, storeContents{
+		transactions: []domain.Transaction{aCancelOfTheWithdraw(t, domain.TransactionCompleted), theWithdraw(t, domain.TransactionCancelled)},
+		bets:         []domain.Bet{theBet(t, domain.BetCancelled)},
+	})
+
+	_, err := fixture.deposit.Execute(context.Background(), aDepositCommand(t, "25.00"))
+
+	assertErrorIs(t, err, domain.ErrBetAlreadySettled)
+}
+
 // A FAILED cancel was never applied: the bet can still be settled.
 func TestDeposit_WithdrawWithAFailedCancel_CompletesTheNewDeposit(t *testing.T) {
 	fixture := givenADepositWithStore(t, theArrangedStoreWith(t, aCancelOfTheWithdraw(t, domain.TransactionFailed)))

@@ -374,7 +374,7 @@ func checkNoCancelInProgress(ctx context.Context, repos domain.Repositories, use
 	if err != nil {
 		return err
 	}
-	if cancel.Status == domain.TransactionFailed {
+	if cancel.Status != domain.TransactionPending {
 		return nil
 	}
 	return fmt.Errorf("%w: the withdraw has a cancel in progress", domain.ErrTransactionPending)
