@@ -140,35 +140,26 @@ func (h *CancelCommandHandler) cancelLocked(
 // transaction stores the cancel as COMPLETED (newBalance = oldBalance), the
 // deposit as CANCELLED and the bet back to PLACED.
 func (h *CancelCommandHandler) cancelWithoutWallet(ctx context.Context, uow domain.UnitOfWork, cancel domain.Transaction, target cancelTarget) (TransactionResult, error) {
-	now := h.clock.Now()
-	completed := cancel
-	if err := completed.Complete(cancel.OldBalance, now); err != nil {
-		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
-	}
-	original := target.original
-	if err := original.MarkCancelled(now); err != nil {
-		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
-	}
-	bet := target.bet
-	if err := revertBet(&bet, original.Type, now); err != nil {
+	state, err := applyCancel(cancel, target, cancel.OldBalance, h.clock.Now())
+	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		if err := repos.Transactions.Insert(ctx, completed); err != nil {
+	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Transactions.Insert(ctx, state.cancel); err != nil {
 			return err
 		}
-		if err := repos.Transactions.Update(ctx, original); err != nil {
+		if err := repos.Transactions.Update(ctx, state.original); err != nil {
 			return err
 		}
-		return repos.Bets.Update(ctx, bet)
+		return repos.Bets.Update(ctx, state.bet)
 	})
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: store: %w", err)
 	}
 
-	h.log(slog.LevelInfo, completed, "completed_without_wallet", nil)
-	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
+	h.log(slog.LevelInfo, state.cancel, "completed_without_wallet", nil)
+	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 
 // sendCompensation sends the movement opposite to the original: a withdraw is
@@ -195,43 +186,57 @@ func balanceAfterCompensation(oldBalance domain.Money, decision domain.CancelDec
 // withdraw cancel, back to PLACED after a deposit cancel. If that cannot be
 // stored, the database still says PENDING, and so does the result.
 func (h *CancelCommandHandler) complete(ctx context.Context, uow domain.UnitOfWork, pending domain.Transaction, target cancelTarget, newBalance domain.Money) (TransactionResult, error) {
-	now := h.clock.Now()
-	completed := pending
-	if err := completed.Complete(newBalance, now); err != nil {
-		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
-	}
-	original := target.original
-	if err := original.MarkCancelled(now); err != nil {
-		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
-	}
-	bet := target.bet
-	if err := revertBet(&bet, original.Type, now); err != nil {
+	state, err := applyCancel(pending, target, newBalance, h.clock.Now())
+	if err != nil {
 		return TransactionResult{}, fmt.Errorf("cancel: %w", err)
 	}
 
-	err := uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
-		if err := repos.Transactions.Update(ctx, completed); err != nil {
+	err = uow.Atomic(ctx, func(ctx context.Context, repos domain.Repositories) error {
+		if err := repos.Transactions.Update(ctx, state.cancel); err != nil {
 			return err
 		}
-		if err := repos.Transactions.Update(ctx, original); err != nil {
+		if err := repos.Transactions.Update(ctx, state.original); err != nil {
 			return err
 		}
-		return repos.Bets.Update(ctx, bet)
+		return repos.Bets.Update(ctx, state.bet)
 	})
 	if err != nil {
 		return h.leavePending(pending, target.bet, "outcome_not_stored", err), nil
 	}
 
-	h.log(slog.LevelInfo, completed, "completed", nil)
-	return TransactionResult{Transaction: completed, BetStatus: &bet.Status}, nil
+	h.log(slog.LevelInfo, state.cancel, "completed", nil)
+	return TransactionResult{Transaction: state.cancel, BetStatus: &state.bet.Status}, nil
 }
 
-// revertBet applies the cancel of the bet's withdraw or deposit to the bet.
-func revertBet(bet *domain.Bet, cancelled domain.TransactionType, now time.Time) error {
-	if cancelled == domain.TransactionWithdraw {
-		return bet.Cancel(now)
+// cancelledState is what a completed cancel stores: the cancel COMPLETED, the
+// original CANCELLED and its bet reverted.
+type cancelledState struct {
+	cancel   domain.Transaction
+	original domain.Transaction
+	bet      domain.Bet
+}
+
+// applyCancel computes the cancelledState in memory, through the domain's
+// transitions; nothing is stored here. The bet becomes CANCELLED after a
+// withdraw cancel, and returns to PLACED after a deposit cancel.
+func applyCancel(pending domain.Transaction, target cancelTarget, newBalance domain.Money, now time.Time) (cancelledState, error) {
+	state := cancelledState{cancel: pending, original: target.original, bet: target.bet}
+	if err := state.cancel.Complete(newBalance, now); err != nil {
+		return cancelledState{}, err
 	}
-	return bet.RevertSettlement(now)
+	if err := state.original.MarkCancelled(now); err != nil {
+		return cancelledState{}, err
+	}
+	if state.original.Type == domain.TransactionWithdraw {
+		if err := state.bet.Cancel(now); err != nil {
+			return cancelledState{}, err
+		}
+	} else {
+		if err := state.bet.RevertSettlement(now); err != nil {
+			return cancelledState{}, err
+		}
+	}
+	return state, nil
 }
 
 // fail stores the cancel as FAILED (the Wallet did not apply the
