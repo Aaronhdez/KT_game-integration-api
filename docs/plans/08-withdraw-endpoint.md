@@ -278,6 +278,36 @@ for step 2); Claude proposes the commit message.
 4. ~~**Time budget.**~~ **Resolved:** accepted (≈ 27 s worst case) and
    documented.
 
+## As built — deviations from this plan
+
+| Planned | Built | Why |
+|---|---|---|
+| `Shared/id`: v4 UUID by hand from `crypto/rand` | `uuid.NewV4().String()` from the standard library's `uuid` package (Go 1.27) | The plan assumed the standard library had no UUID package; it has. `NewV4` rather than `New`, so the format of our IDs cannot change with a Go upgrade. |
+| `FakeStore` hook `FailNextAtomic(err)` | Fields `InsertTransactionErr` / `UpdateTransactionErr` | "Fail the N-th `Atomic`" would tie the tests to how many times the use case calls `Atomic`; "fail when the transaction is updated" describes the situation (the database goes down while storing the outcome). Same pattern as `FakePlayerRepository.Err`. |
+| Player lock in the fake: `map[UserID]*sync.Mutex` | A channel with room for one value per player | A `sync.Mutex` cannot be abandoned while waiting; the port requires giving up when `ctx` is done. |
+| `FakeIDGenerator` in `store.go` | Its own file, `Domain/domaintest/ids.go` | It is another port. |
+| — | `FakeStore.Atomic` fails when `ctx` is already done | Without it, the test "the provider hangs up during the Wallet call" would pass even if the outcome were written with the request's context. |
+| Step 5: one commit | Four commits (shared result; validation + old balance; `PENDING`; Wallet call + outcome) | The developer asked for a finer history; each commit compiles with its tests green. |
+| Step 6: one commit | Error commit by the developer + three commits (error test row; replay; duplicate insert) | Same reason. |
+| Step 7: one commit | Two commits (§7.4 response + status; controller) | `writeTransactionResult` is shared by Deposit and Cancel. |
+| Developer writes the production code of 5, 6 and 7 | The developer wrote 5.1–5.4; Claude, at the developer's request, applied 5.5–5.8, 6 and 7 | The developer's choice during the phase. |
+| Provider ID taken by another player: the generic "store pending" error | `fix(actions): keep internal details out of the taken provider id error`: `"withdraw: %w", ErrTransactionExists` | Found in the manual check: the `409` message carried the repository's error, including the ID of the transaction we had tried to store. |
+| — | Test `MissingAmount_SaysItIsRequired` | Without it, removing the missing-amount check went unnoticed: a missing amount becomes 0, which the use case also rejects with a `400`, only with another message. It matters for deposits (Phase 09), where 0 is valid. |
+| Manual `curl` on `:8080` | Run on `HTTP_PORT=8081` | — |
+| Manual `curl` results | See below | — |
+
+**Manual check against the Wallet mock** (`player_usd`, unique provider IDs):
+new withdraw `201` (`5000.00 → 4989.50`, `PLACED`, 7.1 s); same request `200`
+with the same body in 4 ms; other amount `409`; `EUR` `400`; `999999` `422`
+(stored `FAILED`, no bet); the same ID with `player_usd_2`'s token `409`; no
+token `401`; missing amount `400` "amount is required". Ten new withdraws of
+1.00: 6 × `201`, 3 × `202`, 1 × `502` (the balance read failed twice; nothing
+stored). The database matched every answer (each `201` has a `PLACED` bet,
+each `202` is `PENDING` with no bet). **The three `PENDING` withdraws had been
+applied by the Wallet**: the next withdraw's `oldBalance` was 1.00 lower each
+time. Logs: one line per withdraw with the right outcome; no API key, token or
+password.
+
 ## Definition of done
 
 - `Actions` imports only stdlib and `Domain`; `Application` does not import

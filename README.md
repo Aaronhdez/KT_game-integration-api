@@ -155,8 +155,8 @@ Errors always have the body `{"code": "...", "message": "..."}`:
 | 404 | `NOT_FOUND` | Unknown route or method, or a resource that does not exist or belongs to another player |
 | 409 | `CONFLICT` | Idempotency conflict or invalid state (the message says which) |
 | 422 | `INSUFFICIENT_FUNDS` | The Wallet refused the withdraw |
-| 502 | `WALLET_ERROR` | The Wallet failed or rejected the call |
-| 504 | `WALLET_TIMEOUT` | The Wallet did not answer in time |
+| 502 | `WALLET_ERROR` | The Wallet failed or rejected the call, and nothing was applied |
+| 504 | `WALLET_TIMEOUT` | The Wallet did not answer a read in time (`GET /player` only; an operation with an unknown outcome is a `202`) |
 | 500 | `INTERNAL_ERROR` | Unexpected failure (e.g. database down). Not in the assessment; details only in the logs |
 
 ### Login
@@ -195,6 +195,34 @@ The player comes from the token. The balance is read from the Wallet on every
 request (never cached), so the answer can take several seconds, and the
 unreliable Wallet can make it a `502 WALLET_ERROR` or `504 WALLET_TIMEOUT` —
 just retry. Without a valid token: `401`.
+
+### Withdraw (bet placement)
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/withdraw \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"currency":"USD","amount":10.50,"providerTransactionId":"prov-tx-0001"}'
+```
+
+`201` with `Cache-Control: no-store`:
+
+```json
+{"transactionId":"9bfc9dae-87f4-4270-83e1-fe8fbd2d7cee","providerTransactionId":"prov-tx-0001","oldBalance":5000.00,"newBalance":4989.50,"status":"COMPLETED","betStatus":"PLACED"}
+```
+
+| Status | When |
+|---|---|
+| `201` | Processed for the first time and `COMPLETED`; the bet is `PLACED` |
+| `200` | Same `providerTransactionId` and payload again: the stored result in its current state, without calling the Wallet |
+| `202` | The Wallet's outcome is unknown: `"status":"PENDING"`, `"newBalance":null`, `"betStatus":null` (resolution: Phase 11) |
+| `400` | Missing or invalid field, amount not greater than zero, more than 2 decimals, or a currency that is not the player's |
+| `409` | Same `providerTransactionId` with another amount, an ID already used by another player, or a retry of a withdraw that ended `FAILED` |
+| `422` | Insufficient funds: the transaction is kept as `FAILED` and no bet is created |
+| `502` | The Wallet rejected the withdraw, or the balance before it could not be read (nothing was sent) |
+
+The player comes from the token, and `providerTransactionId` is the
+idempotency key. Expect a few seconds per call and roughly one `202` in four
+from the unreliable Wallet.
 
 *More `curl` examples and OpenAPI spec: Phase 13.*
 

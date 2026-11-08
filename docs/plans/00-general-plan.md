@@ -87,7 +87,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
 | 05 | `05-wallet-client.md` | HTTP Wallet client in `Shared/wallet`: timeouts, `x-api-key`, error mapping to *applied / not applied / unknown*, logging. Fake wallet in `Domain/domaintest` for tests. *(Two timeouts replace `WALLET_TIMEOUT`; balance reads retried once; no automated tests against the real Wallet; the client is wired into `Startup` in Phase 07.)* | 01, 03 |
 | 06 | `06-authentication.md` | `POST /api/v1/auth/login`, JWT issue/verify, auth middleware, identical error for unknown user / wrong password. *(Also: the domain error → HTTP mapping with an extra `500 INTERNAL_ERROR`, the shared JSON body decoder, `Shared/clock`, auth fakes in `domaintest`; naming `XxxController` / `XxxCommandHandler` / `XxxQueryHandler`; the middleware is first attached to a route in Phase 07.)* | 04 |
 | 07 | `07-player-endpoint.md` | `GET /api/v1/player` (Query): live balance from Wallet, 502/504 on failure, never cached. *(Response exactly as §8.2, `{userId, balance, currency}`; DB read first → unknown player 404, Wallet/account currency mismatch 502; no per-player lock; first protected route; Wallet client wired into `Startup`. Found during the phase: login was missing `tokenType` (§8.1) — fixed before it.)* | 05, 06 |
-| 08 | `08-withdraw-endpoint.md` | `POST /api/v1/withdraw` (Action): validation, idempotency, intent-first, betId generation, outcomes 201/200/202/400/409/422/502. | 05, 06 |
+| 08 | `08-withdraw-endpoint.md` | `POST /api/v1/withdraw` (Action): validation, idempotency, intent-first, betId generation, outcomes 201/200/202/400/409/422/502. *(Provider transaction IDs made unique across the system (§6.1, migration `00005`); `oldBalance` read from the Wallet under the lock, its failure is a `502`, never `504`; idempotency by comparing the stored amount and currency, no payload hash; retry of a `FAILED` withdraw → `409` until Phase 11; transaction IDs from the standard library's `uuid`; in-memory store fakes in `domaintest`.)* | 05, 06 |
 | 09 | `09-deposit-endpoint.md` | `POST /api/v1/deposit`: link to withdraw, WON/LOST, single active settlement, zero-amount decision. | 08 |
 | 10 | `10-cancel-endpoint.md` | `POST /api/v1/cancel`: every row of the table in section 8.5 via compensating transactions. | 09 |
 | 11 | `11-pending-resolution.md` | Resolution on retry and/or background reconciler; FAILED-retry policy. | 08–10 |
@@ -175,6 +175,7 @@ This is the initial direction; **Phase 1 (Wallet spike) may change it**.
    money moves — decide in Phase 09.)
 3. Retry after `FAILED`: return the stored failure (pure idempotency) or allow a
    new attempt? (Decide in Phase 11; the assessment asks to document it.)
+   *Interim since Phase 08:* `409 CONFLICT` "previous attempt failed", no Wallet call.
 4. While a request is `PENDING` and the same key arrives again: re-try the
    resolution, or just return 202? (Phase 11.)
 5. ~~Usernames/passwords for the 4 seeded players (Phase 04).~~ **Resolved in
