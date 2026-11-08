@@ -119,6 +119,25 @@ sequenceDiagram
 `Application` maps the result to the status code and the §7.4 body, and every
 domain error to its HTTP code (`writeDomainError`, with `errors.Is`).
 
+Where each step lives in `Actions`. The three handlers embed one `operation`
+struct (`Actions/operation.go`) with the steps they share; embedding is
+composition, not inheritance: `operation` knows nothing about the handler that
+contains it.
+
+| Step in the diagram | Code |
+|---|---|
+| Validate input | `Execute` turns the command into an unexported, validated request (`withdrawRequest`, `depositRequest`, `cancelRequest`) |
+| Take / release the lock | `operation.runLocked` |
+| Idempotency lookup | `replayOrResend` (per handler): stored result, or a re-send if `PENDING` |
+| Read `oldBalance` | `operation.readOldBalance` |
+| Applied / not applied / unknown | `classifyWalletResult` (`Actions/wallet_outcome.go`), then each handler's `finish` |
+| `FAILED` / stays `PENDING` | `operation.fail` / `operation.leavePending` |
+| One log line per operation | `operation.log`, with a typed `logOutcome` (`Actions/log_outcome.go`) |
+
+**Pending resolution** reuses the same path: a provider retry and the
+background resolver both call the handler's `resendPending`, which re-sends the
+identical Wallet request and ends in the same `finish` step as a first attempt.
+
 ## Domain model
 
 | Type | Purpose | Rules enforced in `Domain` |
@@ -193,26 +212,6 @@ or two instances race:
 
 A fourth partial index, `transactions_pending`, only speeds up the resolver's
 scan of `PENDING` rows.
-
-## Shared code of the money operations
-
-The three operation handlers embed one `operation` struct (`Actions/operation.go`)
-with the common dependencies and steps: run under the player's lock
-(`runLocked`), read `oldBalance`, store `FAILED`, leave `PENDING`, log (with a
-typed `logOutcome`, `Actions/log_outcome.go`). `classifyWalletResult`
-(`Actions/wallet_outcome.go`) holds the applied / not applied / unknown rule
-once. Embedding is composition, not inheritance: `operation` knows nothing
-about the handler that contains it.
-
-Each handler's `Execute` validates its command into an unexported request
-(`withdrawRequest`, `depositRequest`, `cancelRequest`) that the rest of the
-handler receives. Its locked step starts with `replayOrResend`: a known
-provider ID gets its stored result, or a re-send if it is `PENDING`; only a
-new one goes on to a new transaction.
-
-**Pending resolution** reuses the same path: a provider retry and the
-background resolver both call the handler's `resendPending`, which re-sends the
-identical Wallet request and ends in the same `finish` step as a first attempt.
 
 ## Naming convention
 
