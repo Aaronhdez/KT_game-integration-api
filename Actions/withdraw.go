@@ -131,6 +131,9 @@ func (h *WithdrawCommandHandler) withdrawLocked(
 		if result, found, lookupErr := h.replayIfProcessed(ctx, uow, player.UserID, providerID, amount, player.Currency); found || lookupErr != nil {
 			return result, lookupErr
 		}
+		// Its message reaches the provider: the reason only, no internal
+		// details such as the ID of the transaction we tried to store.
+		return TransactionResult{}, fmt.Errorf("withdraw: %w", domain.ErrTransactionExists)
 	}
 	if err != nil {
 		return TransactionResult{}, fmt.Errorf("withdraw: store pending: %w", err)

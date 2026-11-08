@@ -107,6 +107,17 @@ func TestWithdrawController_SameProviderIDWithAnotherAmount_Returns409Conflict(t
 	assertStatusAndCode(t, recorder, http.StatusConflict, CodeConflict)
 }
 
+// §6.1: the ID is taken by another player. The provider is told only that,
+// never internal details such as the ID of the transaction we tried to store.
+func TestWithdrawController_ProviderIDOfAnotherPlayer_Returns409WithOnlyThatReason(t *testing.T) {
+	fixture := givenAWithdrawController(t)
+	fixture.store.PutTransaction(anotherPlayersCompletedWithdraw(t))
+
+	recorder := fixture.postAs(testUserID, validWithdrawBody)
+
+	assertStatusAndBody(t, recorder, http.StatusConflict, `{"code":"CONFLICT","message":"withdraw: conflict: a transaction with this provider transaction id already exists"}`)
+}
+
 func TestWithdrawController_RetryOfAFailedWithdraw_Returns409Conflict(t *testing.T) {
 	fixture := givenAWithdrawController(t)
 	fixture.wallet.Next(domaintest.Succeed, domaintest.Reject)
@@ -187,6 +198,7 @@ func TestWithdrawController_BehindRequireAuth_ValidToken_Returns201(t *testing.T
 type withdrawControllerFixture struct {
 	controller *WithdrawController
 	wallet     *domaintest.FakeWallet
+	store      *domaintest.FakeStore
 	tokens     *domaintest.FakeTokens
 }
 
@@ -201,9 +213,10 @@ func givenAWithdrawController(t *testing.T) withdrawControllerFixture {
 		testUserID: {Amount: givenAParsedMoney(t, "5000.00"), Currency: domain.USD},
 	})
 	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	store := domaintest.NewFakeStore()
 	withdraw := actions.NewWithdrawCommandHandler(
 		players,
-		domaintest.NewFakeStore(),
+		store,
 		wallet,
 		&domaintest.FakeIDGenerator{},
 		domaintest.FixedClock{Time: testNow},
@@ -213,7 +226,29 @@ func givenAWithdrawController(t *testing.T) withdrawControllerFixture {
 	return withdrawControllerFixture{
 		controller: NewWithdrawController(withdraw, logger),
 		wallet:     wallet,
+		store:      store,
 		tokens:     &domaintest.FakeTokens{},
+	}
+}
+
+// anotherPlayersCompletedWithdraw holds the provider ID of validWithdrawBody,
+// for player_usd_2.
+func anotherPlayersCompletedWithdraw(t *testing.T) domain.Transaction {
+	t.Helper()
+	newBalance := givenAParsedMoney(t, "31404.75")
+	return domain.Transaction{
+		ID:                    domaintest.FakeTransactionID(99),
+		Type:                  domain.TransactionWithdraw,
+		Status:                domain.TransactionCompleted,
+		UserID:                testSecondUserID,
+		BetID:                 99,
+		ProviderTransactionID: "prov-tx-0001",
+		Amount:                givenAParsedMoney(t, "10.50"),
+		Currency:              domain.USD,
+		OldBalance:            givenAParsedMoney(t, "31415.25"),
+		NewBalance:            &newBalance,
+		CreatedAt:             testNow,
+		UpdatedAt:             testNow,
 	}
 }
 
