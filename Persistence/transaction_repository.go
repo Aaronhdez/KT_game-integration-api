@@ -11,7 +11,7 @@ import (
 	domain "github.com/aaronhdez/kt_game-integration-api/Domain"
 )
 
-const transactionColumns = `id::text, type, status, wallet_user_id, bet_id,
+const transactionColumns = `id::text, type, status, failure_reason, wallet_user_id, bet_id,
 	provider_transaction_id, cancelled_transaction_id::text, amount::text, currency,
 	old_balance::text, new_balance::text, created_at, updated_at`
 
@@ -32,13 +32,14 @@ func newTransactionRepository(db querier) *transactionRepository {
 // index is returned as its domain error (see mapUniqueViolation).
 func (r *transactionRepository) Insert(ctx context.Context, tx domain.Transaction) error {
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO transactions (id, type, status, wallet_user_id, bet_id,
+		INSERT INTO transactions (id, type, status, failure_reason, wallet_user_id, bet_id,
 			provider_transaction_id, cancelled_transaction_id, amount, currency,
 			old_balance, new_balance, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		string(tx.ID),
 		string(tx.Type),
 		string(tx.Status),
+		nullableFailureReason(tx.FailureReason),
 		int64(tx.UserID),
 		int64(tx.BetID),
 		string(tx.ProviderTransactionID),
@@ -124,9 +125,10 @@ func (r *transactionRepository) FindActiveDeposit(ctx context.Context, userID do
 
 func (r *transactionRepository) Update(ctx context.Context, tx domain.Transaction) error {
 	tag, err := r.db.Exec(ctx, `
-		UPDATE transactions SET status = $1, new_balance = $2, updated_at = $3
-		WHERE id = $4 AND wallet_user_id = $5`,
+		UPDATE transactions SET status = $1, failure_reason = $2, new_balance = $3, updated_at = $4
+		WHERE id = $5 AND wallet_user_id = $6`,
 		string(tx.Status),
+		nullableFailureReason(tx.FailureReason),
 		nullableMoney(tx.NewBalance),
 		tx.UpdatedAt,
 		string(tx.ID),
@@ -146,6 +148,7 @@ func scanTransaction(row pgx.Row) (domain.Transaction, error) {
 		id                     string
 		txType                 string
 		status                 string
+		failureReason          *string
 		walletUserID           int64
 		betID                  int64
 		providerTransactionID  string
@@ -157,7 +160,7 @@ func scanTransaction(row pgx.Row) (domain.Transaction, error) {
 		createdAt              time.Time
 		updatedAt              time.Time
 	)
-	if err := row.Scan(&id, &txType, &status, &walletUserID, &betID,
+	if err := row.Scan(&id, &txType, &status, &failureReason, &walletUserID, &betID,
 		&providerTransactionID, &cancelledTransactionID, &amountText, &currencyCode,
 		&oldBalanceText, &newBalanceText, &createdAt, &updatedAt); err != nil {
 		return domain.Transaction{}, err
@@ -192,6 +195,10 @@ func scanTransaction(row pgx.Row) (domain.Transaction, error) {
 		UpdatedAt:             updatedAt,
 	}
 
+	if failureReason != nil {
+		tx.FailureReason = domain.FailureReason(*failureReason)
+	}
+
 	if cancelledTransactionID != nil {
 		tx.CancelledTransactionID = domain.TransactionID(*cancelledTransactionID)
 	}
@@ -214,6 +221,15 @@ func nullableTransactionID(id domain.TransactionID) any {
 		return nil
 	}
 	return string(id)
+}
+
+// nullableFailureReason returns nil (SQL NULL) for an empty reason: only a
+// FAILED transaction has one.
+func nullableFailureReason(reason domain.FailureReason) any {
+	if reason == "" {
+		return nil
+	}
+	return string(reason)
 }
 
 // nullableMoney returns nil (SQL NULL) for a missing amount: NewBalance is

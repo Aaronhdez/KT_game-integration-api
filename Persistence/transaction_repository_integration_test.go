@@ -36,6 +36,17 @@ func TestTransactionRepository_Insert_CompletedWithdraw_StoresTheNewBalance(t *t
 	assertStoredTransaction(t, pool, err, withdraw)
 }
 
+func TestTransactionRepository_Insert_FailedWithdraw_StoresTheReason(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	failTransactionBecause(t, &withdraw, domain.FailureInsufficientFunds)
+
+	err := repository.Insert(testContext(t), withdraw)
+
+	assertStoredTransaction(t, pool, err, withdraw)
+}
+
 func TestTransactionRepository_Insert_SameProviderIDForSamePlayer_ReturnsTransactionExists(t *testing.T) {
 	pool := migratedTestDatabase(t)
 	repository := newTransactionRepository(pool)
@@ -118,6 +129,33 @@ func TestTransactionRepository_FindByID_CompletedWithdraw_ReturnsItWithTheNewBal
 	repository := newTransactionRepository(pool)
 	withdraw := newTestWithdraw(t, pool, eurPlayerID)
 	completeTransaction(t, &withdraw, "9000000000.09")
+	insertTransactionRow(t, pool, withdraw)
+
+	result, err := repository.FindByID(testContext(t), eurPlayerID, withdraw.ID)
+
+	assertTransaction(t, result, err, withdraw)
+}
+
+func TestTransactionRepository_FindByID_FailedWithdraw_ReturnsItWithTheReason(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	failTransactionBecause(t, &withdraw, domain.FailureInsufficientFunds)
+	insertTransactionRow(t, pool, withdraw)
+
+	result, err := repository.FindByID(testContext(t), eurPlayerID, withdraw.ID)
+
+	assertTransaction(t, result, err, withdraw)
+}
+
+// A row that failed before migration 00006 has no reason: it is read with an
+// empty one, so a retry gets ErrPreviousAttemptFailed.
+func TestTransactionRepository_FindByID_FailedWithdrawWithoutReason_ReturnsItWithAnEmptyReason(t *testing.T) {
+	pool := migratedTestDatabase(t)
+	repository := newTransactionRepository(pool)
+	withdraw := newTestWithdraw(t, pool, eurPlayerID)
+	failTransaction(t, &withdraw)
+	withdraw.FailureReason = ""
 	insertTransactionRow(t, pool, withdraw)
 
 	result, err := repository.FindByID(testContext(t), eurPlayerID, withdraw.ID)
@@ -351,6 +389,29 @@ func TestTransactionRepository_Update_FailedTransaction_KeepsNewBalanceNull(t *t
 	assertStoredTransaction(t, pool, err, withdraw)
 }
 
+func TestTransactionRepository_Update_FailedTransaction_StoresTheReason(t *testing.T) {
+	testCases := []struct {
+		name   string
+		reason domain.FailureReason
+	}{
+		{name: "insufficient funds", reason: domain.FailureInsufficientFunds},
+		{name: "wallet rejected", reason: domain.FailureWalletRejected},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pool := migratedTestDatabase(t)
+			repository := newTransactionRepository(pool)
+			withdraw := newTestWithdraw(t, pool, eurPlayerID)
+			insertTransactionRow(t, pool, withdraw)
+			failTransactionBecause(t, &withdraw, testCase.reason)
+
+			err := repository.Update(testContext(t), withdraw)
+
+			assertStoredTransaction(t, pool, err, withdraw)
+		})
+	}
+}
+
 func TestTransactionRepository_Update_ChangedAmount_IsNotStored(t *testing.T) {
 	pool := migratedTestDatabase(t)
 	repository := newTransactionRepository(pool)
@@ -448,18 +509,18 @@ func assertStoredTransaction(t *testing.T, pool *pgxpool.Pool, err error, expect
 func readTransactionRow(t *testing.T, pool *pgxpool.Pool, id domain.TransactionID) domain.Transaction {
 	t.Helper()
 	var (
-		txType, status, providerID, currency string
-		userID, betID                        int64
-		cancelledID, newBalanceText          *string
-		amountText, oldBalanceText           string
-		createdAt, updatedAt                 time.Time
+		txType, status, failureReason, providerID, currency string
+		userID, betID                                       int64
+		cancelledID, newBalanceText                         *string
+		amountText, oldBalanceText                          string
+		createdAt, updatedAt                                time.Time
 	)
 	err := pool.QueryRow(testContext(t), `
-		SELECT type, status, wallet_user_id, bet_id, provider_transaction_id,
+		SELECT type, status, COALESCE(failure_reason, ''), wallet_user_id, bet_id, provider_transaction_id,
 			cancelled_transaction_id::text, amount::text, currency,
 			old_balance::text, new_balance::text, created_at, updated_at
 		FROM transactions WHERE id = $1`, string(id)).
-		Scan(&txType, &status, &userID, &betID, &providerID,
+		Scan(&txType, &status, &failureReason, &userID, &betID, &providerID,
 			&cancelledID, &amountText, &currency,
 			&oldBalanceText, &newBalanceText, &createdAt, &updatedAt)
 	if err != nil {
@@ -470,6 +531,7 @@ func readTransactionRow(t *testing.T, pool *pgxpool.Pool, id domain.TransactionI
 		ID:                    id,
 		Type:                  domain.TransactionType(txType),
 		Status:                domain.TransactionStatus(status),
+		FailureReason:         domain.FailureReason(failureReason),
 		UserID:                domain.UserID(userID),
 		BetID:                 domain.BetID(betID),
 		ProviderTransactionID: domain.ProviderTransactionID(providerID),
@@ -497,6 +559,7 @@ func assertTransaction(t *testing.T, result domain.Transaction, err error, expec
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.ID != expected.ID || result.Type != expected.Type || result.Status != expected.Status ||
+		result.FailureReason != expected.FailureReason ||
 		result.UserID != expected.UserID || result.BetID != expected.BetID ||
 		result.ProviderTransactionID != expected.ProviderTransactionID ||
 		result.CancelledTransactionID != expected.CancelledTransactionID ||
@@ -536,7 +599,10 @@ func completeTransaction(t *testing.T, tx *domain.Transaction, newBalance string
 // the repository under test.
 func insertTransactionRow(t *testing.T, pool *pgxpool.Pool, tx domain.Transaction) {
 	t.Helper()
-	var cancelledID, newBalance any
+	var failureReason, cancelledID, newBalance any
+	if tx.FailureReason != "" {
+		failureReason = string(tx.FailureReason)
+	}
 	if tx.CancelledTransactionID != "" {
 		cancelledID = string(tx.CancelledTransactionID)
 	}
@@ -544,11 +610,11 @@ func insertTransactionRow(t *testing.T, pool *pgxpool.Pool, tx domain.Transactio
 		newBalance = tx.NewBalance.String()
 	}
 	execSQL(t, pool, `
-		INSERT INTO transactions (id, type, status, wallet_user_id, bet_id,
+		INSERT INTO transactions (id, type, status, failure_reason, wallet_user_id, bet_id,
 			provider_transaction_id, cancelled_transaction_id, amount, currency,
 			old_balance, new_balance, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		string(tx.ID), string(tx.Type), string(tx.Status), int64(tx.UserID), int64(tx.BetID),
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		string(tx.ID), string(tx.Type), string(tx.Status), failureReason, int64(tx.UserID), int64(tx.BetID),
 		string(tx.ProviderTransactionID), cancelledID, tx.Amount.String(), string(tx.Currency),
 		tx.OldBalance.String(), newBalance, tx.CreatedAt, tx.UpdatedAt)
 }
@@ -586,7 +652,12 @@ func newTestCancel(t *testing.T, pool *pgxpool.Pool, original domain.Transaction
 // its creation, as a use case would when the Wallet did not apply it.
 func failTransaction(t *testing.T, tx *domain.Transaction) {
 	t.Helper()
-	if err := tx.Fail(domain.FailureWalletRejected, tx.CreatedAt.Add(time.Second)); err != nil {
+	failTransactionBecause(t, tx, domain.FailureWalletRejected)
+}
+
+func failTransactionBecause(t *testing.T, tx *domain.Transaction, reason domain.FailureReason) {
+	t.Helper()
+	if err := tx.Fail(reason, tx.CreatedAt.Add(time.Second)); err != nil {
 		t.Fatalf("fail transaction %s: %v", tx.ID, err)
 	}
 }
