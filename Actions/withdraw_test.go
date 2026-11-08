@@ -785,7 +785,8 @@ func withdrawCall(t *testing.T, amount string) domaintest.Call {
 
 // Wallet wrappers: each one changes a single thing of the FakeWallet.
 
-// storeObservingWallet records what the store held when Withdraw was called.
+// storeObservingWallet records what the store held when Withdraw or Deposit
+// was called.
 type storeObservingWallet struct {
 	*domaintest.FakeWallet
 	store *domaintest.FakeStore
@@ -797,7 +798,12 @@ func (wallet *storeObservingWallet) Withdraw(ctx context.Context, operation doma
 	return wallet.FakeWallet.Withdraw(ctx, operation)
 }
 
-// balanceUnknownWallet applies the withdraw but reports that the new balance
+func (wallet *storeObservingWallet) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
+	wallet.seen = wallet.store.Transactions()
+	return wallet.FakeWallet.Deposit(ctx, operation)
+}
+
+// balanceUnknownWallet applies the operation but reports that the new balance
 // is unknown, as the real client does for a 2xx with an unusable body.
 type balanceUnknownWallet struct {
 	*domaintest.FakeWallet
@@ -810,8 +816,15 @@ func (wallet balanceUnknownWallet) Withdraw(ctx context.Context, operation domai
 	return domain.Money{}, fmt.Errorf("test wallet: %w", domain.ErrWalletAppliedBalanceUnknown)
 }
 
+func (wallet balanceUnknownWallet) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
+	if _, err := wallet.FakeWallet.Deposit(ctx, operation); err != nil {
+		return domain.Money{}, err
+	}
+	return domain.Money{}, fmt.Errorf("test wallet: %w", domain.ErrWalletAppliedBalanceUnknown)
+}
+
 // callerLeavingWallet cancels the caller's context while the Wallet applies
-// the withdraw, as when the provider closes the connection.
+// the operation, as when the provider closes the connection.
 type callerLeavingWallet struct {
 	*domaintest.FakeWallet
 	leave context.CancelFunc
@@ -820,6 +833,11 @@ type callerLeavingWallet struct {
 func (wallet callerLeavingWallet) Withdraw(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
 	wallet.leave()
 	return wallet.FakeWallet.Withdraw(ctx, operation)
+}
+
+func (wallet callerLeavingWallet) Deposit(ctx context.Context, operation domain.WalletOperation) (domain.Money, error) {
+	wallet.leave()
+	return wallet.FakeWallet.Deposit(ctx, operation)
 }
 
 // racingWallet stores an identical withdraw when the old balance is read,
